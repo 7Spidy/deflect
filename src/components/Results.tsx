@@ -1,19 +1,22 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { Boss } from "@/game/bosses";
 import { MISS_WINDOW_MS, PERFECT_WINDOW_MS } from "@/game/config";
 import { msUntilNextLocalDay, toDateString } from "@/game/daily";
 import {
+  bestWorst,
   biasOf,
   biasSentence,
   GRADE_TITLES,
   gradeFor,
+  offsetPhrase,
   runScore,
+  tierLine,
   type StrikeResult,
 } from "@/game/scoring";
-import { buildShareText } from "@/game/share";
-import { renderShareImage, scoreColor } from "@/game/shareImage";
+import { scoreColor } from "@/game/shareImage";
+import ShareActions from "./ShareActions";
 import { Footer, Logo } from "./ui";
 
 export interface ResultsProps {
@@ -29,24 +32,33 @@ export interface ResultsProps {
   onStats: () => void;
 }
 
+/** Dots stagger over 6 rows of 12 units, so any strike count stays on the axis. */
+const STAGGER_ROWS = 6;
+const ROW_H = 12;
+
 function Timeline({ results }: { results: StrikeResult[] }) {
   const W = 600;
   const x0 = 24;
   const x1 = W - 24;
   const mid = W / 2;
   const scale = (x1 - x0) / 2 / MISS_WINDOW_MS;
-  const axisY = 96;
+  const rows = Math.min(STAGGER_ROWS, Math.max(1, results.length));
+  const top = 22;
+  const axisY = top + (rows - 1) * ROW_H + 14;
+  const height = axisY + 54;
+  const r = results.length > 12 ? 6 : 9;
+  const k = r / 9;
   const ticks = [-300, -150, 0, 150, 300];
   return (
     <svg
-      viewBox={`0 0 ${W} 150`}
+      viewBox={`0 0 ${W} ${height}`}
       className="w-full"
       role="img"
       aria-label={`Timeline of taps from 300 milliseconds early to 300 milliseconds late. ${results
-        .map((r, i) =>
-          r.offset === null
+        .map((res, i) =>
+          res.offset === null
             ? `Strike ${i + 1}: no tap.`
-            : `Strike ${i + 1}: ${Math.round(Math.abs(r.offset))} milliseconds ${r.offset < 0 ? "early" : "late"}.`,
+            : `Strike ${i + 1}: ${Math.round(Math.abs(res.offset))} milliseconds ${res.offset < 0 ? "early" : "late"}.`,
         )
         .join(" ")}`}
     >
@@ -80,21 +92,25 @@ function Timeline({ results }: { results: StrikeResult[] }) {
           </text>
         </g>
       ))}
-      {results.map((r, i) => {
-        if (r.offset === null) return null;
-        const out = Math.abs(r.offset) > MISS_WINDOW_MS;
-        const x = mid + Math.max(-MISS_WINDOW_MS, Math.min(MISS_WINDOW_MS, r.offset)) * scale;
-        const y = 22 + i * 15;
+      {results.map((res, i) => {
+        if (res.offset === null) return null;
+        const out = Math.abs(res.offset) > MISS_WINDOW_MS;
+        const x = mid + Math.max(-MISS_WINDOW_MS, Math.min(MISS_WINDOW_MS, res.offset)) * scale;
+        const y = top + (i % STAGGER_ROWS) * ROW_H;
         return (
           <g key={i}>
-            <line x1={x} y1={y} x2={x} y2={axisY} stroke={scoreColor(r.score)} strokeWidth="2" opacity="0.6" />
+            <line x1={x} y1={y} x2={x} y2={axisY} stroke={scoreColor(res.score)} strokeWidth="2" opacity="0.4" />
             {out ? (
               <path
-                d={r.offset < 0 ? `M${x + 12} ${y - 10} L${x - 6} ${y} L${x + 12} ${y + 10}z` : `M${x - 12} ${y - 10} L${x + 6} ${y} L${x - 12} ${y + 10}z`}
-                fill={scoreColor(r.score)}
+                d={
+                  res.offset < 0
+                    ? `M${x + 12 * k} ${y - 10 * k} L${x - 6 * k} ${y} L${x + 12 * k} ${y + 10 * k}z`
+                    : `M${x - 12 * k} ${y - 10 * k} L${x + 6 * k} ${y} L${x - 12 * k} ${y + 10 * k}z`
+                }
+                fill={scoreColor(res.score)}
               />
             ) : (
-              <circle cx={x} cy={y} r="9" fill={scoreColor(r.score)} stroke="#060508" strokeWidth="2" />
+              <circle cx={x} cy={y} r={r} fill={scoreColor(res.score)} stroke="#060508" strokeWidth="2" />
             )}
           </g>
         );
@@ -140,63 +156,18 @@ export default function Results(props: ResultsProps) {
   const score = runScore(results);
   const grade = gradeFor(score);
   const bias = biasOf(results);
-  const [shareState, setShareState] = useState<"idle" | "copied" | "failed">("idle");
-  const imageRef = useRef<File | null>(null);
-
-  // Pre-render the share card so the share sheet opens inside the tap gesture.
-  useEffect(() => {
-    if (mode !== "daily") return;
-    let cancelled = false;
-    renderShareImage({
-      puzzle,
-      bossName: boss.name,
-      results,
-      siteLabel: window.location.host,
-    })
-      .then((file) => {
-        if (!cancelled) imageRef.current = file;
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [mode, puzzle, boss, results]);
-
-  const share = async () => {
-    const text = buildShareText(puzzle, results, window.location.origin);
-    if (typeof navigator.share === "function") {
-      try {
-        const file = imageRef.current;
-        if (file && navigator.canShare?.({ files: [file] })) {
-          await navigator.share({ text, files: [file] });
-        } else {
-          await navigator.share({ text });
-        }
-        return;
-      } catch (err) {
-        if (err instanceof DOMException && err.name === "AbortError") return;
-        // otherwise fall through to the clipboard
-      }
-    }
-    try {
-      await navigator.clipboard.writeText(text);
-      setShareState("copied");
-    } catch {
-      setShareState("failed");
-    }
-    window.setTimeout(() => setShareState("idle"), 2200);
-  };
+  const extremes = bestWorst(results);
 
   return (
-    <main className="relative z-[1] mx-auto flex min-h-dvh w-full max-w-[32rem] flex-col px-5 pt-[max(env(safe-area-inset-top),1.5rem)]">
-      <div className="rise-in flex flex-1 flex-col items-center gap-6 text-center">
+    <main className="relative z-[1] mx-auto flex min-h-dvh w-full max-w-[32rem] flex-col px-5 pt-[max(env(safe-area-inset-top),1.25rem)]">
+      <div className="rise-in flex flex-1 flex-col items-center gap-4 text-center">
         <Logo small />
         <p className="font-display text-base tracking-[0.2em] text-ash uppercase">
           {mode === "daily" ? `No. ${puzzle}` : "Practice"} · {boss.name}
         </p>
 
         <section aria-label="Grade" className="flex flex-col items-center">
-          <p className="logo text-[7rem] leading-none font-black" style={{ letterSpacing: 0, marginRight: 0 }}>
+          <p className="logo text-[6rem] leading-none font-black" style={{ letterSpacing: 0, marginRight: 0 }}>
             {grade}
           </p>
           <h2 className="mt-1 font-display text-3xl font-bold tracking-[0.18em] text-gold-bright uppercase">
@@ -209,41 +180,27 @@ export default function Results(props: ResultsProps) {
 
         <section aria-label="Timing" className="w-full">
           <Timeline results={results} />
-          <p className="mt-2 text-xl text-bone italic">{biasSentence(bias)}</p>
+          <p className="mt-1 text-xl text-bone italic">{biasSentence(bias)}</p>
         </section>
 
-        <table className="w-full max-w-sm border-collapse text-left text-lg tabular-nums">
-          <caption className="sr-only">Each strike</caption>
-          <tbody>
-            {results.map((r, i) => (
-              <tr key={i} className="border-b border-bone/10">
-                <th scope="row" className="py-1.5 pr-3 font-normal text-ash">
-                  <span
-                    aria-hidden="true"
-                    className="mr-3 inline-block h-3 w-3 rotate-45"
-                    style={{ background: scoreColor(r.score) }}
-                  />
-                  Strike {i + 1}
-                </th>
-                <td className="py-1.5 text-bone">
-                  {r.offset === null
-                    ? "no tap"
-                    : Math.round(r.offset) === 0
-                      ? "dead on"
-                      : `${Math.round(Math.abs(r.offset))} ms ${r.offset < 0 ? "early" : "late"}`}
-                </td>
-                <td className="py-1.5 text-right text-bone">{r.score}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <section aria-label="Summary" className="flex flex-col gap-0.5 text-lg text-ash">
+          <p className="text-bone tabular-nums">{tierLine(results)}</p>
+          {extremes && (
+            <>
+              <p>
+                Best: strike {extremes.best.index + 1},{" "}
+                <span className="text-bone">{offsetPhrase(extremes.best.result)}</span>
+              </p>
+              <p>
+                Worst: strike {extremes.worst.index + 1},{" "}
+                <span className="text-bone">{offsetPhrase(extremes.worst.result)}</span>
+              </p>
+            </>
+          )}
+        </section>
 
         <div className="flex flex-col items-center gap-3">
-          {mode === "daily" && (
-            <button type="button" className="btn btn-primary" onClick={share}>
-              {shareState === "copied" ? "Copied" : shareState === "failed" ? "Could not share" : "Share"}
-            </button>
-          )}
+          {mode === "daily" && <ShareActions puzzle={puzzle} bossName={boss.name} results={results} />}
           <div className="flex flex-wrap justify-center gap-3">
             <button type="button" className={mode === "practice" ? "btn btn-primary" : "btn"} onClick={props.onPractice}>
               {mode === "practice" ? "Practice again" : "Practice"}
@@ -257,10 +214,29 @@ export default function Results(props: ResultsProps) {
               Records
             </button>
           </div>
-          <span className="sr-only" role="status">
-            {shareState === "copied" ? "Result copied to clipboard" : ""}
-          </span>
         </div>
+
+        <details className="w-full max-w-sm text-left">
+          <summary className="cursor-pointer text-center font-display text-base tracking-[0.18em] text-ash uppercase">
+            All strikes
+          </summary>
+          <ol className="mt-3 grid grid-cols-2 gap-x-5 gap-y-1 text-base tabular-nums">
+            {results.map((r, i) => (
+              <li key={i} className="flex items-baseline justify-between gap-2 border-b border-bone/10 py-1">
+                <span className="text-ash">
+                  <span
+                    aria-hidden="true"
+                    className="mr-2 inline-block h-2.5 w-2.5 rotate-45"
+                    style={{ background: scoreColor(r.score) }}
+                  />
+                  {i + 1}
+                </span>
+                <span className="text-bone">{offsetPhrase(r)}</span>
+                <span className="w-7 text-right text-bone">{r.score}</span>
+              </li>
+            ))}
+          </ol>
+        </details>
 
         {mode === "daily" ? (
           <Countdown date={date} />

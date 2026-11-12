@@ -3,7 +3,12 @@ import type { StrikeResult } from "./scoring";
 import { emptyStats, type Stats } from "./stats";
 
 const PREFIX = "deflect:v1:";
-const DAILY_PREFIX = `${PREFIX}daily:`;
+/**
+ * Daily records are v2 (a run is 30 strikes now, 5 before). Stats stay on v1 so
+ * streaks survive. Old v1 daily records are dropped by pruneDaily.
+ */
+const DAILY_PREFIX = "deflect:v2:daily:";
+const LEGACY_DAILY_PREFIX = `${PREFIX}daily:`;
 const STATS_KEY = `${PREFIX}stats`;
 const HOWTO_KEY = `${PREFIX}seenHowTo`;
 const MUTED_KEY = `${PREFIX}muted`;
@@ -77,14 +82,16 @@ export function saveDaily(rec: DailyRecord): void {
   write(DAILY_PREFIX + rec.date, rec);
 }
 
-/** Drop records for other days so storage does not grow forever. */
+/** Drop records for other days, and every legacy v1 daily record. */
 export function pruneDaily(keepDate: string): void {
   try {
     const ls = window.localStorage;
     const stale: string[] = [];
     for (let i = 0; i < ls.length; i++) {
       const k = ls.key(i);
-      if (k && k.startsWith(DAILY_PREFIX) && k !== DAILY_PREFIX + keepDate) stale.push(k);
+      if (!k) continue;
+      if (k.startsWith(LEGACY_DAILY_PREFIX)) stale.push(k);
+      else if (k.startsWith(DAILY_PREFIX) && k !== DAILY_PREFIX + keepDate) stale.push(k);
     }
     stale.forEach((k) => ls.removeItem(k));
   } catch {

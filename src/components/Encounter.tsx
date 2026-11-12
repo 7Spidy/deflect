@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { GameAudio } from "@/game/audio";
 import type { Boss } from "@/game/bosses";
-import { STRIKES_PER_RUN } from "@/game/config";
+import { ROUNDS_PER_RUN, STRIKES_PER_ROUND } from "@/game/config";
 import { Engine } from "@/game/engine";
-import type { StrikeResult } from "@/game/scoring";
+import { runScore, type StrikeResult } from "@/game/scoring";
+import LeaveDialog from "./LeaveDialog";
+import RoundBar from "./RoundBar";
 import { MuteToggle } from "./ui";
 
 export interface EncounterProps {
@@ -22,6 +24,8 @@ export interface EncounterProps {
   onResult: (index: number, result: StrikeResult) => void;
   onVoid: (index: number, attempts: number[]) => void;
   onComplete: (results: StrikeResult[]) => void;
+  /** The player left the fight. Daily progress is already saved by onResult/onVoid. */
+  onCancel: () => void;
 }
 
 interface Feedback {
@@ -31,36 +35,47 @@ interface Feedback {
   tone: string;
 }
 
-function feedbackFor(result: StrikeResult, id: number): Feedback {
+interface Banner {
+  id: number;
+  round: number;
+  avg: number;
+  leaving: boolean;
+}
+
+/** Consecutive True deflects ending at the last entry. */
+function trailingTrue(results: readonly StrikeResult[]): number {
+  let n = 0;
+  for (let i = results.length - 1; i >= 0 && results[i]?.score >= 95; i--) n++;
+  return n;
+}
+
+function feedbackFor(result: StrikeResult, id: number, streak: number): Feedback {
   const { offset, score } = result;
   if (offset === null) {
     return { id, title: "Unanswered", detail: "No tap", tone: "text-blood" };
   }
   const ms = Math.round(Math.abs(offset));
   const detail = ms === 0 ? "0 ms, dead on" : `${ms} ms ${offset < 0 ? "early" : "late"}`;
-  if (score >= 95) return { id, title: "True", detail, tone: "text-gold-bright" };
+  if (score >= 95) {
+    return {
+      id,
+      title: "True",
+      detail: streak >= 3 ? `${detail}  x${streak}` : detail,
+      tone: "text-gold-bright",
+    };
+  }
   if (score >= 75) return { id, title: "Clean", detail, tone: "text-moss" };
   if (score >= 40) return { id, title: "Glancing", detail, tone: "text-ember" };
   if (score > 0) return { id, title: "Grazed", detail, tone: "text-ash" };
   return { id, title: offset < 0 ? "Too early" : "Too late", detail, tone: "text-blood" };
 }
 
-function pipClass(result: StrikeResult | undefined, active: boolean): string {
-  if (!result) {
-    return active
-      ? "border-gold-bright bg-gold/30 shadow-[0_0_10px_rgba(243,220,154,0.7)]"
-      : "border-ash/50 bg-transparent";
-  }
-  if (result.score >= 95) return "border-gold-bright bg-gold-bright";
-  if (result.score >= 75) return "border-moss bg-moss";
-  if (result.score >= 40) return "border-ember bg-ember";
-  return "border-blood/80 bg-blood/40";
-}
-
 export default function Encounter(props: EncounterProps) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const debugRef = useRef<HTMLPreElement>(null);
+  const engineRef = useRef<Engine | null>(null);
+  const dialogOpenRef = useRef(false);
   const propsRef = useRef(props);
   useLayoutEffect(() => {
     propsRef.current = props;
@@ -71,6 +86,22 @@ export default function Encounter(props: EncounterProps) {
   const [intro, setIntro] = useState(true);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [voided, setVoided] = useState(false);
+  const [banner, setBanner] = useState<Banner | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+
+  // Hold the fight and ask. A tapped strike that is already in flight is not voided.
+  const openLeave = useCallback(() => {
+    if (dialogOpenRef.current) return;
+    dialogOpenRef.current = true;
+    engineRef.current?.pause();
+    setDialogOpen(true);
+  }, []);
+
+  const keepFighting = useCallback(() => {
+    dialogOpenRef.current = false;
+    setDialogOpen(false);
+    engineRef.current?.resume();
+  }, []);
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -79,6 +110,15 @@ export default function Encounter(props: EncounterProps) {
     const p = propsRef.current;
     const collected: StrikeResult[] = [...p.initialResults];
     let feedbackId = 0;
+    let bannerId = 0;
+    const timers = new Set<number>();
+    const later = (fn: () => void, ms: number) => {
+      const id = window.setTimeout(() => {
+        timers.delete(id);
+        fn();
+      }, ms);
+      timers.add(id);
+    };
 
     const engine = new Engine({
       canvas,
@@ -86,6 +126,7 @@ export default function Encounter(props: EncounterProps) {
       seed: p.seed,
       startIndex: p.initialResults.length,
       attempts: p.attempts,
+      priorTrueStreak: trailingTrue(p.initialResults),
       reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
       audio: p.audio,
       onStrikeStart: (index) => {
@@ -93,14 +134,24 @@ export default function Encounter(props: EncounterProps) {
         setVoided(false);
         setFeedback(null);
         setActive(index);
+        // The round banner fades as the next strike begins.
+        setBanner((b) => (b ? { ...b, leaving: true } : b));
+        later(() => setBanner(null), 400);
         propsRef.current.onStrikeStart(index);
       },
       onResult: (index, result) => {
         collected[index] = result;
         setResults([...collected]);
         setActive(null);
-        setFeedback(feedbackFor(result, ++feedbackId));
+        setFeedback(feedbackFor(result, ++feedbackId, trailingTrue(collected.slice(0, index + 1))));
         propsRef.current.onResult(index, result);
+      },
+      onRoundEnd: (round) => {
+        const from = round * STRIKES_PER_ROUND;
+        const mine = collected.slice(from, from + STRIKES_PER_ROUND);
+        const id = ++bannerId;
+        setBanner({ id, round: round + 1, avg: runScore(mine), leaving: false });
+        later(() => setBanner((b) => (b && b.id === id ? { ...b, leaving: true } : b)), 1400);
       },
       onVoid: (index, attempts) => {
         setActive(null);
@@ -110,6 +161,7 @@ export default function Encounter(props: EncounterProps) {
       },
       onComplete: () => propsRef.current.onComplete([...collected]),
     });
+    engineRef.current = engine;
     engine.start();
     p.audio.startDrone();
 
@@ -120,12 +172,22 @@ export default function Encounter(props: EncounterProps) {
     const onPointerDown = (e: PointerEvent) => {
       if (isControl(e.target)) return;
       e.preventDefault();
+      if (dialogOpenRef.current) return;
       if (!e.isPrimary || (e.pointerType === "mouse" && e.button !== 0)) return;
       propsRef.current.audio.unlock();
       engine.tap(e.timeStamp);
     };
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        // The dialog handles its own Escape; otherwise Escape asks to leave.
+        if (dialogOpenRef.current) return;
+        e.preventDefault();
+        openLeave();
+        return;
+      }
       if (e.code !== "Space" && e.key !== " ") return;
+      // With the dialog open Space belongs to the focused button, not the blade.
+      if (dialogOpenRef.current) return;
       e.preventDefault();
       if (e.repeat) return;
       propsRef.current.audio.unlock();
@@ -155,6 +217,7 @@ export default function Encounter(props: EncounterProps) {
             `hold      ${f(d.holdMs)} ms`,
             `swing     ${f(d.swingMs)} ms`,
             `feint at  ${f(d.feintAtMs)} ms`,
+            `stall     ${f(d.stallAtMs)} + ${f(d.stallDurMs)} ms`,
             `impact at ${f(d.impactAt, 1)}`,
             `to impact ${f(d.toImpact)} ms`,
             `raw off   ${f(d.lastOffset, 2)} ms`,
@@ -165,16 +228,39 @@ export default function Encounter(props: EncounterProps) {
       debugRaf = requestAnimationFrame(tick);
     }
 
+    // A phone that sleeps mid-fight hides the page and voids the strike.
+    let lock: WakeLockSentinel | null = null;
+    let gone = false;
+    const requestLock = async () => {
+      try {
+        const next = (await navigator.wakeLock?.request("screen")) ?? null;
+        if (gone) void next?.release().catch(() => undefined);
+        else lock = next;
+      } catch {
+        // unsupported, or the browser refused: the fight still works
+      }
+    };
+    void requestLock();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void requestLock();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
     return () => {
+      gone = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      void lock?.release().catch(() => undefined);
+      timers.forEach((id) => window.clearTimeout(id));
       cancelAnimationFrame(debugRaf);
       observer.disconnect();
       window.removeEventListener("keydown", onKeyDown);
       surface.removeEventListener("pointerdown", onPointerDown);
       blocked.forEach((type) => surface.removeEventListener(type, block));
       engine.destroy();
+      engineRef.current = null;
       p.audio.stopDrone();
     };
-  }, []);
+  }, [openLeave]);
 
   const { boss, mode } = props;
 
@@ -183,25 +269,40 @@ export default function Encounter(props: EncounterProps) {
       <div className="relative h-dvh w-[min(100vw,50dvh)] overflow-hidden">
         <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" aria-hidden="true" />
 
-        <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-col items-center gap-2 px-12 pt-[max(env(safe-area-inset-top),0.9rem)]">
-          <p className="text-center font-display text-base tracking-[0.12em] text-ash uppercase">
-            {mode === "practice" ? "Practice · " : ""}
-            {boss.name}
-          </p>
-          <ol className="flex gap-3" aria-label="Strikes">
-            {Array.from({ length: STRIKES_PER_RUN }, (_, i) => (
-              <li
-                key={i}
-                aria-label={`Strike ${i + 1}${results[i] ? `: ${results[i].score}` : ""}`}
-                className={`h-3.5 w-3.5 rotate-45 border transition-colors ${pipClass(results[i], active === i)}`}
-              />
-            ))}
-          </ol>
+        <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-col items-center gap-2 px-14 pt-[max(env(safe-area-inset-top),0.9rem)]">
+          <RoundBar boss={boss} practice={mode === "practice"} results={results} active={active} />
         </div>
 
-        <div className="absolute top-[max(env(safe-area-inset-top),0.5rem)] right-2" data-notap>
+        <div className="absolute top-[max(env(safe-area-inset-top),0.5rem)] left-2" data-notap>
           <MuteToggle muted={props.muted} onToggle={props.onToggleMute} compact />
         </div>
+        <div className="absolute top-[max(env(safe-area-inset-top),0.5rem)] right-2" data-notap>
+          <button
+            type="button"
+            onClick={openLeave}
+            aria-label="Leave the fight"
+            className="btn btn-quiet min-h-11 min-w-11 px-3"
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+
+        {banner && (
+          <div
+            key={banner.id}
+            className={`pointer-events-none absolute inset-x-0 top-[40%] flex flex-col items-center text-center transition-opacity duration-300 ${
+              banner.leaving ? "opacity-0" : "opacity-100"
+            }`}
+            aria-live="polite"
+          >
+            <p className="fade-in font-display text-xl tracking-[0.22em] text-gold-bright uppercase">
+              Round {banner.round} of {ROUNDS_PER_RUN}
+            </p>
+            <p className="fade-in text-xl text-bone tabular-nums">avg {banner.avg}</p>
+          </div>
+        )}
 
         <div
           className="pointer-events-none absolute inset-x-0 top-[83%] flex flex-col items-center text-center"
@@ -217,7 +318,7 @@ export default function Encounter(props: EncounterProps) {
           )}
           {voided && (
             <p className="fade-in px-6 text-lg text-ash italic">
-              You looked away. That strike is void and will come again, changed.
+              That strike is void and will come again, changed.
             </p>
           )}
           {intro && (
@@ -233,8 +334,12 @@ export default function Encounter(props: EncounterProps) {
         {props.debug && (
           <pre
             ref={debugRef}
-            className="pointer-events-none absolute top-20 left-2 bg-black/70 p-2 font-mono text-base leading-tight text-moss"
+            className="pointer-events-none absolute top-24 left-2 bg-black/70 p-2 font-mono text-base leading-tight text-moss"
           />
+        )}
+
+        {dialogOpen && (
+          <LeaveDialog mode={mode} onKeep={keepFighting} onLeave={props.onCancel} />
         )}
       </div>
     </div>

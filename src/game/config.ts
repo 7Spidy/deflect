@@ -5,15 +5,42 @@
 /** Local date of puzzle #1 (YYYY-MM-DD). */
 export const LAUNCH_DATE = "2026-11-10";
 
-export const STRIKES_PER_RUN = 5;
-export const MAX_FEINTS_PER_RUN = 2;
+/**
+ * Run structure. A run is ROUNDS_PER_RUN rounds of STRIKES_PER_ROUND strikes.
+ * Everything keys off these two numbers; nothing else hardcodes a count.
+ */
+export const ROUNDS_PER_RUN = 10;
+export const STRIKES_PER_ROUND = 3;
+export const STRIKES_PER_RUN = ROUNDS_PER_RUN * STRIKES_PER_ROUND;
+export const roundOf = (i: number) => Math.floor(i / STRIKES_PER_ROUND);
+export const isRoundEnd = (i: number) => (i + 1) % STRIKES_PER_ROUND === 0;
 
 /** Strike phase timings (ms). */
 export const RAISE_MS = 500;
-export const INTRO_MS = 1500;
-export const GAP_MS = 1200;
+/** Guardian reveal. */
+export const INTRO_MS = 3000;
 /** Pause after the final strike before the results screen. */
-export const OUTRO_MS = 1400;
+export const OUTRO_MS = 2000;
+/** Minimum recovery after impact. */
+export const GAP_MS = 1500;
+/** Strike start to next strike start, floor. Guarantees the run length. */
+export const MIN_CYCLE_MS = 3600;
+/** Extra beat after the last strike of a round (not after the final one). */
+export const ROUND_BREAK_MS = 1200;
+/** A run must never be shorter than this (see pacing.ts). */
+export const TARGET_RUN_MS = 120_000;
+
+/** Rounds before this index have no feints or stalls. */
+export const WARMUP_ROUNDS = 1;
+/** A feint OR a stall, never both in one strike. */
+export const MAX_DECEPTIVE_PER_ROUND = 1;
+
+/**
+ * Stall (delayed swing): mid-swing the blade hangs, then snaps through.
+ * STALL_AT_FRACTION is the fraction of the swing travel time at which it hangs.
+ */
+export const STALL_DURATION_MS = [260, 420] as const;
+export const STALL_AT_FRACTION = [0.45, 0.7] as const;
 
 /** Scoring window (ms). */
 export const PERFECT_WINDOW_MS = 33;

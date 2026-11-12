@@ -1,8 +1,9 @@
 import { ImageResponse } from "next/og";
+import { bannerLine, ogAlt } from "@/game/copy";
 
 // Rendered once at build time and served as a static PNG.
 export const dynamic = "force-static";
-export const alt = "Deflect: the daily parry. One foe, five strikes, one tap each.";
+export const alt = ogAlt();
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -40,7 +41,7 @@ export default function OpengraphImage() {
           }}
         />
         <div style={{ display: "flex", fontSize: 40, letterSpacing: 8, marginTop: 44, color: "#ded6c6" }}>
-          ONE FOE · FIVE STRIKES · ONE TAP EACH
+          {bannerLine()}
         </div>
         <div style={{ display: "flex", fontSize: 30, marginTop: 20, color: "#a39cae" }}>
           A daily parry, scored to the millisecond

@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Cinzel, EB_Garamond } from "next/font/google";
+import { pitch } from "@/game/copy";
 import "./globals.css";
 
 const cinzel = Cinzel({
@@ -22,8 +23,7 @@ const siteUrl =
     ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
     : "http://localhost:3000");
 
-const description =
-  "One foe. Five strikes. Tap at the instant of impact. A daily parry-timing duel scored to the millisecond.";
+const description = pitch();
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),

@@ -8,13 +8,18 @@ import {
 } from "./scoring";
 
 /**
- * Plain-text share block. No em dashes.
+ * Plain-text share block. No em dashes. The emoji grid wraps in rows of
+ * SHARE_ROW, chronological, so 30 strikes make three rows:
  *
  *   Deflect #12 · A (88)
- *   🟡🟢🟡🟠🟢
+ *   🟡🟢🟡🟠🟢🟡🟢🟡🟡🟢
+ *   🟡🟢🟡🟠🟢🟡🟢🟡🟡🟢
+ *   🟡🟢🟡🟠🟢🟡🟢🟡🟡🟢
  *   Avg 41ms off, leaning early
  *   <site url>
  */
+export const SHARE_ROW = 10;
+
 export function buildShareText(
   puzzle: number,
   results: readonly StrikeResult[],
@@ -29,10 +34,10 @@ export function buildShareText(
       : `Avg ${Math.round(bias.meanAbs)}ms off, ${
           lean === "even" ? "no lean" : `leaning ${lean}`
         }`;
-  return [
-    `Deflect #${puzzle} · ${gradeFor(score)} (${score})`,
-    results.map((r) => strikeEmoji(r.score)).join(""),
-    biasLine,
-    siteUrl,
-  ].join("\n");
+  const emoji = results.map((r) => strikeEmoji(r.score));
+  const rows: string[] = [];
+  for (let i = 0; i < emoji.length; i += SHARE_ROW) {
+    rows.push(emoji.slice(i, i + SHARE_ROW).join(""));
+  }
+  return [`Deflect #${puzzle} · ${gradeFor(score)} (${score})`, ...rows, biasLine, siteUrl].join("\n");
 }

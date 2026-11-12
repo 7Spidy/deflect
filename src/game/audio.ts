@@ -6,7 +6,7 @@ export class GameAudio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private noise: AudioBuffer | null = null;
-  private drone: { gain: GainNode; stop: () => void } | null = null;
+  private drone: { gain: GainNode; filter: BiquadFilterNode; stop: () => void } | null = null;
   private muted: boolean;
 
   constructor(muted = false) {
@@ -82,6 +82,7 @@ export class GameAudio {
     filter.connect(gain).connect(master);
     this.drone = {
       gain,
+      filter,
       stop: () => {
         const now = ctx.currentTime;
         gain.gain.cancelScheduledValues(now);
@@ -94,6 +95,17 @@ export class GameAudio {
   stopDrone(): void {
     this.drone?.stop();
     this.drone = null;
+  }
+
+  /** Muffle the drone for a moment: the blade is hanging mid-swing. */
+  dip(durMs: number): void {
+    const { ctx, drone } = this;
+    if (!ctx || !drone) return;
+    const t = ctx.currentTime;
+    const f = drone.filter.frequency;
+    f.cancelScheduledValues(t);
+    f.setTargetAtTime(95, t, 0.04);
+    f.setTargetAtTime(170, t + Math.max(0.05, durMs / 1000), 0.09);
   }
 
   private noiseSource(): AudioBufferSourceNode | null {
@@ -193,6 +205,134 @@ export class GameAudio {
       src.connect(lp).connect(ng).connect(master);
       src.start(t);
       src.stop(t + 0.18);
+    }
+  }
+
+  /** An early tap cutting empty air: a thin high swish, no body. */
+  whiff(): void {
+    const { ctx, master } = this;
+    const src = this.noiseSource();
+    if (!ctx || !master || !src) return;
+    const t = ctx.currentTime;
+    const band = ctx.createBiquadFilter();
+    band.type = "bandpass";
+    band.Q.value = 2.2;
+    band.frequency.setValueAtTime(3200, t);
+    band.frequency.exponentialRampToValueAtTime(900, t + 0.16);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.22, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+    src.connect(band).connect(gain).connect(master);
+    src.start(t);
+    src.stop(t + 0.2);
+  }
+
+  /** Steel dragging along steel: a glancing parry. */
+  scrape(): void {
+    const { ctx, master } = this;
+    const src = this.noiseSource();
+    if (!ctx || !master || !src) return;
+    const t = ctx.currentTime;
+    const band = ctx.createBiquadFilter();
+    band.type = "bandpass";
+    band.Q.value = 3.5;
+    band.frequency.setValueAtTime(2400, t);
+    band.frequency.exponentialRampToValueAtTime(1300, t + 0.26);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.3, t + 0.03);
+    gain.gain.setValueAtTime(0.3, t + 0.1);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
+    src.connect(band).connect(gain).connect(master);
+    src.start(t);
+    src.stop(t + 0.32);
+    // A thin ring underneath so it still reads as metal.
+    const o = ctx.createOscillator();
+    o.type = "triangle";
+    o.frequency.setValueAtTime(760, t);
+    o.frequency.exponentialRampToValueAtTime(520, t + 0.22);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.1, t);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + 0.24);
+    o.connect(og).connect(master);
+    o.start(t);
+    o.stop(t + 0.26);
+  }
+
+  /** A grazing, barely-there knock: dull and short. */
+  clack(): void {
+    const { ctx, master } = this;
+    if (!ctx || !master) return;
+    const t = ctx.currentTime;
+    const o = ctx.createOscillator();
+    o.type = "square";
+    o.frequency.setValueAtTime(310, t);
+    o.frequency.exponentialRampToValueAtTime(190, t + 0.06);
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 1400;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.28, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
+    o.connect(lp).connect(g).connect(master);
+    o.start(t);
+    o.stop(t + 0.1);
+    const src = this.noiseSource();
+    if (src) {
+      const hp = ctx.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = 1800;
+      const ng = ctx.createGain();
+      ng.gain.setValueAtTime(0.22, t);
+      ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.035);
+      src.connect(hp).connect(ng).connect(master);
+      src.start(t);
+      src.stop(t + 0.05);
+    }
+  }
+
+  /** The guard breaking: a bright shatter over a splintering low crack. */
+  crack(): void {
+    const { ctx, master } = this;
+    if (!ctx || !master) return;
+    const t = ctx.currentTime;
+    const src = this.noiseSource();
+    if (src) {
+      const hp = ctx.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = 1500;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.6, t + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+      src.connect(hp).connect(g).connect(master);
+      src.start(t);
+      src.stop(t + 0.24);
+    }
+    const o = ctx.createOscillator();
+    o.type = "sawtooth";
+    o.frequency.setValueAtTime(240, t);
+    o.frequency.exponentialRampToValueAtTime(70, t + 0.14);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.32, t);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+    o.connect(og).connect(master);
+    o.start(t);
+    o.stop(t + 0.2);
+    // Falling glints of the shards.
+    for (let i = 0; i < 3; i++) {
+      const gl = ctx.createOscillator();
+      gl.type = "sine";
+      gl.frequency.value = 2400 + Math.random() * 2400;
+      const gg = ctx.createGain();
+      const at = t + 0.05 + i * 0.07;
+      gg.gain.setValueAtTime(0.0001, at);
+      gg.gain.exponentialRampToValueAtTime(0.08, at + 0.004);
+      gg.gain.exponentialRampToValueAtTime(0.0001, at + 0.12);
+      gl.connect(gg).connect(master);
+      gl.start(at);
+      gl.stop(at + 0.14);
     }
   }
 }

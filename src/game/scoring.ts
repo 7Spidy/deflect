@@ -96,3 +96,69 @@ export function biasSentence(bias: Bias): string {
   if (lean === "even") return "Your timing shows no lean, early or late.";
   return `You swing ${Math.round(Math.abs(bias.meanSigned))}ms ${lean} on average`;
 }
+
+export interface TierCounts {
+  true: number;
+  clean: number;
+  glancing: number;
+  grazed: number;
+  missed: number;
+}
+
+/** Same cut-offs as the in-fight feedback: True 95, Clean 75, Glancing 40. */
+export function tierCounts(results: readonly StrikeResult[]): TierCounts {
+  const c: TierCounts = { true: 0, clean: 0, glancing: 0, grazed: 0, missed: 0 };
+  for (const r of results) {
+    if (r.score >= 95) c.true++;
+    else if (r.score >= 75) c.clean++;
+    else if (r.score >= 40) c.glancing++;
+    else if (r.score > 0) c.grazed++;
+    else c.missed++;
+  }
+  return c;
+}
+
+/** "19 true, 7 clean, 3 glancing, 1 missed". Empty tiers are left out. */
+export function tierLine(results: readonly StrikeResult[]): string {
+  const c = tierCounts(results);
+  const parts: Array<[number, string]> = [
+    [c.true, "true"],
+    [c.clean, "clean"],
+    [c.glancing, "glancing"],
+    [c.grazed, "grazed"],
+    [c.missed, "missed"],
+  ];
+  return parts
+    .filter(([n]) => n > 0)
+    .map(([n, label]) => `${n} ${label}`)
+    .join(", ");
+}
+
+/** "no tap", "dead on" or "42 ms early". */
+export function offsetPhrase(r: StrikeResult): string {
+  if (r.offset === null) return "no tap";
+  if (Math.round(r.offset) === 0) return "dead on";
+  return `${Math.round(Math.abs(r.offset))} ms ${r.offset < 0 ? "early" : "late"}`;
+}
+
+export interface Extreme {
+  /** Zero-based strike index. */
+  index: number;
+  result: StrikeResult;
+}
+
+/** Highest and lowest scoring strikes. Ties go to the earlier strike. */
+export function bestWorst(results: readonly StrikeResult[]): { best: Extreme; worst: Extreme } | null {
+  if (results.length === 0) return null;
+  let best = 0;
+  let worst = 0;
+  const rank = (r: StrikeResult) => r.score * 1000 - (r.offset === null ? 999 : Math.min(999, Math.abs(r.offset)));
+  results.forEach((r, i) => {
+    if (rank(r) > rank(results[best])) best = i;
+    if (rank(r) < rank(results[worst])) worst = i;
+  });
+  return {
+    best: { index: best, result: results[best] },
+    worst: { index: worst, result: results[worst] },
+  };
+}

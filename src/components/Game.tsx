@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GameAudio } from "@/game/audio";
 import { BOSSES, type Boss } from "@/game/bosses";
-import { STRIKES_PER_RUN } from "@/game/config";
+import { ROUNDS_PER_RUN, roundOf, STRIKES_PER_RUN } from "@/game/config";
+import { howToStrikes, tagline } from "@/game/copy";
 import {
   bossForDate,
   dailySeed,
@@ -29,6 +30,7 @@ import {
   type DailyRecord,
 } from "@/game/storage";
 import Encounter from "./Encounter";
+import GuardianPortrait from "./GuardianPortrait";
 import Results from "./Results";
 import StatsModal from "./StatsModal";
 import { Footer, Logo, MuteToggle } from "./ui";
@@ -180,6 +182,20 @@ export default function Game() {
     setScreen("results");
   };
 
+  // Leaving a fight. Daily progress was already saved by onResult/onVoid, so the
+  // title screen shows Continue at the right round. Practice just goes home.
+  const onCancel = () => {
+    const rec = dailyRef.current;
+    setRun(null);
+    if (run?.mode === "daily" && rec?.done) {
+      // The last strike landed while the dialog was open: there is nothing to continue.
+      setFinished({ mode: "daily", boss: boot?.boss ?? run.boss, results: rec.results });
+      setScreen("results");
+      return;
+    }
+    setScreen("title");
+  };
+
   if (!boot || screen === "loading") {
     return (
       <>
@@ -201,9 +217,21 @@ export default function Game() {
         <main className="relative z-[1] mx-auto flex min-h-dvh w-full max-w-[32rem] flex-col px-5 pt-[max(env(safe-area-inset-top),1.5rem)]">
           <div className="rise-in flex flex-1 flex-col items-center justify-center gap-9 text-center">
             <Logo />
-            <p className="-mt-3 text-xl text-ash italic">A daily parry. Five strikes. One tap each.</p>
+            <p className="-mt-3 text-xl text-ash italic">{tagline()}</p>
 
-            <section aria-label="Today's foe" className="flex flex-col items-center gap-1">
+            <section aria-label="Today's foe" className="relative isolate flex flex-col items-center gap-1">
+              {boot.boss.art && (
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute top-[-6rem] left-1/2 -z-10 h-[26rem] w-[22rem] -translate-x-1/2 overflow-hidden opacity-40 [mask-image:linear-gradient(to_bottom,black_40%,transparent)]"
+                >
+                  <GuardianPortrait
+                    boss={boot.boss}
+                    seed={dailySeed(boot.date)}
+                    className="h-[39rem] w-[22rem]"
+                  />
+                </div>
+              )}
               <p className="font-display text-base tracking-[0.24em] text-ash uppercase">
                 No. {boot.puzzle} · {WEEKDAY_NAMES[weekdayOf(boot.date)]}
               </p>
@@ -213,13 +241,13 @@ export default function Game() {
               <p className="text-xl text-ash italic">{boot.boss.epitaph}</p>
             </section>
 
-            <div className="flex flex-col items-center gap-3">
+            <div className="relative flex flex-col items-center gap-3">
               <button type="button" className="btn btn-primary" onClick={begin}>
                 {partial ? "Continue" : "Begin"}
               </button>
               {partial && (
                 <p className="text-lg text-ash">
-                  Strike {(daily?.results.length ?? 0) + 1} of {STRIKES_PER_RUN} awaits.
+                  Round {roundOf(daily?.results.length ?? 0) + 1} of {ROUNDS_PER_RUN} awaits.
                 </p>
               )}
               <div className="flex gap-2">
@@ -246,7 +274,7 @@ export default function Game() {
             <li>
               Tap once, the instant steel meets the <span className="text-gold-bright">gold line</span>.
             </li>
-            <li>Five strikes, one chance each. Beware false starts.</li>
+            <li>{howToStrikes()}</li>
           </ol>
           <button
             type="button"
@@ -279,6 +307,7 @@ export default function Game() {
           onResult={onResult}
           onVoid={onVoid}
           onComplete={onComplete}
+          onCancel={onCancel}
         />
       )}
 

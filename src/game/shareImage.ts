@@ -127,16 +127,18 @@ export async function renderShareImage(input: ShareImageInput): Promise<File | n
   ctx.textAlign = "center";
   ctx.fillText("impact", mid, y + 80);
 
+  // Dots stagger over 6 rows of 12 px so any number of strikes stays on the axis.
+  const dot = input.results.length > 12 ? 7 : 11;
   input.results.forEach((r, i) => {
     if (r.offset === null) return;
     const clamped = Math.max(-MISS_WINDOW_MS, Math.min(MISS_WINDOW_MS, r.offset));
     const x = mid + clamped * scale;
-    const yy = y - 30 + i * 15;
+    const yy = y - 30 + (i % 6) * 12;
     ctx.fillStyle = scoreColor(r.score);
     ctx.shadowColor = scoreColor(r.score);
     ctx.shadowBlur = r.score >= 95 ? 18 : 0;
     ctx.beginPath();
-    ctx.arc(x, yy, 11, 0, Math.PI * 2);
+    ctx.arc(x, yy, dot, 0, Math.PI * 2);
     ctx.fill();
     ctx.shadowBlur = 0;
   });
