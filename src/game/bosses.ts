@@ -8,8 +8,14 @@
  *  stallRoundChance probability (0..1) per round that one strike has a delayed swing
  *                   (a round holds at most one feint OR stall, see planDeception)
  *  art              optional guardian image, see public/guardians/README.md
+ *  moves            attack strings for each phase (see moves.ts); the day picks
+ *                   the order and one signature move
+ *  phaseTwo         what changes at PHASE_TWO_ROUND: a line and new eye colour
+ *  interlude        the beat the guardian plays between rounds, and the mark it
+ *                   leaves on the arena, one per round
  */
 import type { Accent, Motion } from "./living";
+import type { MoveId } from "./moves";
 
 export type Range = readonly [min: number, max: number];
 
@@ -37,6 +43,29 @@ export interface GuardianArt {
   accents?: Accent[];
 }
 
+export type Rgb = readonly [number, number, number];
+
+/**
+ * Between-round beats. Each leaves a mark that accumulates over the run:
+ *  coins    a coin drops from the lantern and joins a row on the floor
+ *  thorns   briar creeps in from the bottom corners
+ *  stars    a star appears and the dusk deepens
+ *  candles  a votive flame lights, alternating sides
+ *  bell     the bell tolls and one more wisp drifts in the dark
+ *  roots    a pale root climbs from the floor
+ *  dark     a candle gutters out and the room closes in
+ */
+export type InterludeKind = "coins" | "thorns" | "stars" | "candles" | "bell" | "roots" | "dark";
+
+export interface Interlude {
+  kind: InterludeKind;
+  rgb: Rgb;
+  /** Image-fraction point the beat starts from (lantern, bell, hand). */
+  from?: readonly [number, number];
+  /** Several such points, one per round in turn (the King's crown of candles). */
+  spots?: ReadonlyArray<readonly [number, number]>;
+}
+
 export interface Boss {
   id: string;
   /** 0 = Sunday ... 6 = Saturday (matches Date.getDay). */
@@ -48,6 +77,9 @@ export interface Boss {
   feintRoundChance: number;
   stallRoundChance: number;
   art?: GuardianArt;
+  moves: { one: readonly MoveId[]; two: readonly MoveId[] };
+  phaseTwo: { line: string; eye: Rgb };
+  interlude: Interlude;
   look: {
     kind: SilhouetteKind;
     /** RGB triplet for the eye glow. */
@@ -65,6 +97,9 @@ export const BOSSES: readonly Boss[] = [
     swingMs: [380, 450],
     feintRoundChance: 0,
     stallRoundChance: 0,
+    moves: { one: ["measured", "linger", "quicken"], two: ["quicken", "rush", "linger"] },
+    phaseTwo: { line: "The toll doubles.", eye: [255, 96, 48] },
+    interlude: { kind: "coins", rgb: [255, 176, 80], from: [0.25, 0.745] },
     look: { kind: "keeper", eye: [255, 170, 80] },
     art: {
       src: "/guardians/toll-keeper.webp",
@@ -86,6 +121,9 @@ export const BOSSES: readonly Boss[] = [
     swingMs: [240, 320],
     feintRoundChance: 0,
     stallRoundChance: 0,
+    moves: { one: ["measured", "quicken", "rush"], two: ["flurry", "rush", "quicken"] },
+    phaseTwo: { line: "The briar pulls tight.", eye: [226, 255, 84] },
+    interlude: { kind: "thorns", rgb: [150, 200, 90] },
     look: { kind: "knight", eye: [190, 230, 120] },
     art: {
       src: "/guardians/thornbound-knight.webp",
@@ -111,6 +149,9 @@ export const BOSSES: readonly Boss[] = [
     swingMs: [340, 420],
     feintRoundChance: 0,
     stallRoundChance: 0.5,
+    moves: { one: ["linger", "measured", "heavy"], two: ["lull", "heavy", "linger"] },
+    phaseTwo: { line: "Dusk gives way to night.", eye: [128, 104, 255] },
+    interlude: { kind: "stars", rgb: [186, 176, 255], from: [0.5, 0.12] },
     look: { kind: "warden", eye: [170, 160, 255] },
     art: {
       src: "/guardians/warden-vesper.webp",
@@ -144,6 +185,9 @@ export const BOSSES: readonly Boss[] = [
     swingMs: [260, 440],
     feintRoundChance: 0.25,
     stallRoundChance: 0.25,
+    moves: { one: ["waver", "measured", "unruly"], two: ["unruly", "waver", "flurry"] },
+    phaseTwo: { line: "The confessions turn on each other.", eye: [255, 54, 54] },
+    interlude: { kind: "candles", rgb: [255, 140, 80] },
     look: { kind: "twins", eye: [255, 120, 90] },
     art: {
       src: "/guardians/penitent-twins.webp",
@@ -163,6 +207,9 @@ export const BOSSES: readonly Boss[] = [
     swingMs: [300, 400],
     feintRoundChance: 0.6,
     stallRoundChance: 0.2,
+    moves: { one: ["measured", "linger", "lull"], two: ["lull", "waver", "heavy"] },
+    phaseTwo: { line: "The dead answer the bell.", eye: [176, 255, 236] },
+    interlude: { kind: "bell", rgb: [120, 230, 210], from: [0.826, 0.225] },
     look: { kind: "caller", eye: [120, 230, 210] },
     art: {
       src: "/guardians/gravecaller-oswin.webp",
@@ -191,6 +238,9 @@ export const BOSSES: readonly Boss[] = [
     swingMs: [220, 300],
     feintRoundChance: 0.3,
     stallRoundChance: 0.35,
+    moves: { one: ["heavy", "lull", "linger"], two: ["lull", "rush", "heavy"] },
+    phaseTwo: { line: "Something old cracks open.", eye: [214, 240, 110] },
+    interlude: { kind: "roots", rgb: [228, 216, 180] },
     look: { kind: "mother", eye: [240, 225, 170] },
     art: {
       src: "/guardians/mother-marrow.webp",
@@ -219,6 +269,22 @@ export const BOSSES: readonly Boss[] = [
     swingMs: [200, 440],
     feintRoundChance: 0.4,
     stallRoundChance: 0.4,
+    moves: { one: ["measured", "waver", "heavy", "rush"], two: ["unruly", "flurry", "lull", "rush"] },
+    phaseTwo: { line: "The dark leans closer.", eye: [140, 165, 255] },
+    // One dead candle in the crown catches, gutters and dies after every round.
+    interlude: {
+      kind: "dark",
+      rgb: [235, 240, 255],
+      spots: [
+        [0.477, 0.058],
+        [0.596, 0.072],
+        [0.413, 0.072],
+        [0.656, 0.079],
+        [0.538, 0.079],
+        [0.36, 0.1],
+        [0.69, 0.1],
+      ],
+    },
     look: { kind: "king", eye: [235, 240, 255] },
     art: {
       src: "/guardians/unlit-king.webp",

@@ -1,4 +1,5 @@
-import type { Boss, SilhouetteKind } from "./bosses";
+import { Arena, type Anchor } from "./arena";
+import type { Boss, Rgb, SilhouetteKind } from "./bosses";
 import {
   LivingPortrait,
   loadGuardianImage,
@@ -7,6 +8,8 @@ import {
   type KickKind,
   type PortraitRect,
 } from "./living";
+import { omenFor, type Omen } from "./moves";
+import { DEATHBLOW_BEATS } from "./stagger";
 
 /**
  * Canvas 2D renderer. Knows nothing about rules, only how to draw a frame.
@@ -58,6 +61,8 @@ export interface FrameState {
   stalled: boolean;
   /** Device pixel ratio, for the portrait's offscreen buffer. */
   pixelRatio: number;
+  /** The Deathblow beats are running: start and mark (raw clock), else null. */
+  deathblow?: { t0: number; mark: number } | null;
 }
 
 const GOLD = "212,175,55";
@@ -160,6 +165,7 @@ export class Scene {
   private crack: { start: number; pts: number[] } | null = null;
   private slash: { start: number } | null = null;
   private guardBreakAt = -1e9;
+  private cleave: { start: number } | null = null;
   private flareUntil = -1;
 
   // Hit-stop: a visual clock that stops for 60 ms. Timing never sees it.
@@ -169,6 +175,7 @@ export class Scene {
   private debt = 0;
   private lastRaw = 0;
   private lastV = 0;
+  private lastAngle = 0;
 
   private fog: HTMLCanvasElement;
   private cache: Cache | null = null;
@@ -176,12 +183,18 @@ export class Scene {
   private artDebug: ArtDebug;
   private eyeBuf: Array<[number, number]> = [];
   private destroyed = false;
+  private arena: Arena;
+  private anchorRect: PortraitRect | null = null;
+  private anchorNow = 0;
+  private geo = { w: 1, h: 1, cx: 0.5, headY: 0 };
 
   constructor(
     private boss: Boss,
     private reducedMotion: boolean,
     private seed: string = "deflect",
+    omen: Omen = omenFor(seed),
   ) {
+    this.arena = new Arena(boss, seed, omen, reducedMotion);
     this.fog = document.createElement("canvas");
     this.fog.width = this.fog.height = 128;
     const g = this.fog.getContext("2d")!;
@@ -216,6 +229,32 @@ export class Scene {
     p.setArt(img);
     this.portrait = p;
   }
+
+  /** Resuming a saved run: lay down the marks of the finished rounds. */
+  restore(rounds: number): void {
+    this.arena.restore(rounds);
+  }
+
+  /**
+   * A round resolved: the guardian's between-round beat, and with `phaseShift`
+   * its turn into phase two. Visual only, inside the round break.
+   */
+  interlude(round: number, now: number, phaseShift: boolean): void {
+    this.arena.interlude(round, now, phaseShift);
+    if (phaseShift && !this.reducedMotion) {
+      // The shake lands with the turn (see PHASE_PEAK in arena.ts).
+      this.shake = { start: this.v(now) + 2850, dur: 520, mag: 5 };
+    }
+  }
+
+  /** Image fractions to screen, under the current living pose. */
+  private anchor: Anchor = (fx, fy) => {
+    const rect = this.anchorRect;
+    const p = this.portrait;
+    if (!rect || !p) return null;
+    const [x, y] = p.transformPoint(fx, fy, this.anchorNow);
+    return [rect.x + x * rect.w, rect.y + y * rect.h];
+  };
 
   /** Discrete fight events for the living portrait. */
   kick(kind: KickKind, now: number): void {
@@ -365,6 +404,50 @@ export class Scene {
       );
     }
     if (!this.reducedMotion) this.shake = { start: t, dur: 380, mag: l.w * 0.03 };
+  }
+
+  /** The guardian staggers: the arena flinches red once. */
+  deathblowStart(now: number): void {
+    const t = this.v(now);
+    this.edge = { start: t, dur: 600, alpha: 0.25 * this.fxA };
+    this.flash = { rgb: "140,20,20", alpha: 0.18 * this.fxA, start: t, dur: 400 };
+    this.flareUntil = now + 500;
+  }
+
+  /** Beats abandoned (the fight was held). Nothing lingers. */
+  deathblowCancel(): void {
+    this.edge = null;
+  }
+
+  /** Deathblow landed: a gold cleave through the guardian, the biggest hit in the game. */
+  deathblowLanded(now: number, l: Layout): void {
+    const t = this.v(now);
+    this.cleave = { start: t };
+    this.burst(t, l, 80, 1.4, SPARK, "255,240,200");
+    this.addRing(t, 520, l.w * 0.05, l.w * 0.6, 4, 0.9, "255,236,180");
+    this.addRing(t + 110, 640, l.w * 0.05, l.w * 0.8, 2.5, 0.6, "255,214,120");
+    this.addRing(t + 220, 760, l.w * 0.05, l.w * 1.0, 1.5, 0.4, "255,200,90");
+    this.flash = { rgb: "255,236,190", alpha: 0.45 * this.fxA, start: t, dur: 520 };
+    this.guardPulse = t;
+    this.emberTrailUntil = t + 900;
+    if (!this.reducedMotion) {
+      this.shake = { start: t + 140, dur: 520, mag: l.w * 0.035 };
+      this.rays = { start: t };
+      this.zoom = { start: t, dur: 420 };
+      this.freezeFrom = now;
+      this.freezeUntil = now + 140;
+      this.freezeAngle = this.lastAngle;
+    }
+  }
+
+  /** Deathblow missed: the guardian recovers with a roar of red. */
+  deathblowFailed(now: number, l: Layout): void {
+    const t = this.v(now);
+    this.edge = { start: t, dur: 500, alpha: 0.4 * this.fxA };
+    this.flash = { rgb: "120,14,14", alpha: 0.3 * this.fxA, start: t, dur: 500 };
+    this.flareUntil = now + 1100;
+    this.addRing(t, 500, l.w * 0.05, l.w * 0.5, 3, 0.5, "200,40,40");
+    if (!this.reducedMotion) this.shake = { start: t, dur: 300, mag: l.w * 0.015 };
   }
 
   private addRing(
@@ -545,7 +628,7 @@ export class Scene {
     if (this.shake) {
       const u = (now - this.shake.start) / this.shake.dur;
       if (u >= 1) this.shake = null;
-      else {
+      else if (u >= 0) {
         const m = this.shake.mag * (1 - u);
         ctx.translate((Math.random() - 0.5) * 2 * m, (Math.random() - 0.5) * 2 * m);
       }
@@ -569,13 +652,23 @@ export class Scene {
     ctx.fillRect(0, 0, w, h);
     ctx.globalAlpha = 1;
 
+    const geo = this.geo;
+    geo.w = w;
+    geo.h = h;
+    geo.cx = cx;
+    geo.headY = c.headY;
+    this.arena.drawBack(ctx, geo, raw);
+
     this.drawFog(ctx, l, drift, BACK_FOG, 0.6 + 0.4 * s.presence);
 
     // Boss: living portrait when the art has landed, silhouette otherwise.
     const flare = raw < this.flareUntil ? 1 : 0;
-    let menace = Math.max(s.menace, flare);
+    let menace = Math.max(s.menace, flare, this.arena.menace(raw));
+    const eyeRgb = this.arena.eyeRgb(raw);
     const portrait = this.portrait;
     const rect = portrait?.ready ? this.artRect(l, c) : null;
+    this.anchorRect = rect;
+    this.anchorNow = raw;
     if (portrait && rect) {
       portrait.draw(ctx, rect, raw, s.presence, s.pixelRatio);
       const fx = portrait.eyeFx(raw);
@@ -589,18 +682,19 @@ export class Scene {
           this.eyeBuf[i][1] = rect.y + fy0 * rect.h;
         }
         const k = eyes.length > 2 ? 0.75 : 1;
-        drawEyes(ctx, this.boss, rect.w * 0.85 * k, this.eyeBuf, eyes.length, s.presence, menace, drift, fx.blink, fx.level);
+        drawEyes(ctx, eyeRgb, rect.w * 0.85 * k, this.eyeBuf, eyes.length, s.presence, menace, drift, fx.blink, fx.level);
         if (this.artDebug.eyes) drawCrosshairs(ctx, this.eyeBuf, eyes.length);
       }
     } else {
       ctx.globalAlpha = 0.25 + 0.75 * s.presence;
       drawSilhouette(ctx, this.boss.look.kind, l, c.headY);
       ctx.globalAlpha = 1;
-      drawEyes(ctx, this.boss, w, c.silEyes, c.silEyes.length, s.presence, menace, drift, 1, 1);
+      drawEyes(ctx, eyeRgb, w, c.silEyes, c.silEyes.length, s.presence, menace, drift, 1, 1);
     }
 
     this.drawFog(ctx, l, drift, FRONT_FOG, 1);
-    if (!this.reducedMotion) drawEmbers(ctx, l, drift);
+    if (!this.reducedMotion) drawEmbers(ctx, l, drift, this.arena.emberLevel(raw));
+    this.arena.drawFront(ctx, geo, raw, this.anchor);
 
     this.drawGuard(ctx, l, c, now);
     this.drawCrack(ctx, now);
@@ -615,6 +709,7 @@ export class Scene {
     }
     if (s.trailFrom !== null && !this.reducedMotion && !frozen) drawTrail(ctx, l, s.trailFrom, angle);
     drawBlade(ctx, l, c.steel, angle);
+    this.lastAngle = angle;
 
     if (now < this.bladeSparkUntil && !this.reducedMotion) {
       const along = l.len * (0.78 + Math.random() * 0.22);
@@ -650,6 +745,8 @@ export class Scene {
     this.drawRings(ctx, l, now);
     this.drawWhiff(ctx, l, now);
     this.drawSlash(ctx, l, now);
+    this.drawCleave(ctx, l, c, now);
+    if (s.deathblow) this.drawBeats(ctx, l, raw, s.deathblow);
     this.drawParticles(ctx, l, now, dt);
     ctx.restore();
 
@@ -672,6 +769,7 @@ export class Scene {
         ctx.globalAlpha = 1;
       }
     }
+    this.arena.drawOverlay(ctx, geo, raw);
     ctx.fillStyle = c.vig;
     ctx.fillRect(0, 0, w, h);
   }
@@ -825,6 +923,91 @@ export class Scene {
   }
 
   /** Bite: a diagonal red slash from the blade tip. */
+  /**
+   * The Deathblow count: a ring closes on the guard line and the target pulses
+   * on every heartbeat. The mark is the last beat, the instant the ring lands.
+   */
+  private drawBeats(
+    ctx: CanvasRenderingContext2D,
+    l: Layout,
+    raw: number,
+    db: { t0: number; mark: number },
+  ): void {
+    const lead = db.mark - db.t0;
+    const u = Math.max(0, Math.min(1, (raw - db.t0) / lead));
+    const beat = lead / DEATHBLOW_BEATS;
+    const since = (raw - db.t0) % beat;
+    const pulse = raw < db.mark + 60 ? Math.max(0, 1 - since / 220) : 0;
+    const r0 = l.w * 0.05;
+    const x = l.cx;
+    const y = l.gy;
+    ctx.save();
+    // Target.
+    ctx.strokeStyle = `rgba(255,214,120,${0.55 + 0.45 * pulse})`;
+    ctx.lineWidth = 2 + 2 * pulse;
+    ctx.shadowColor = "rgba(255,80,40,0.8)";
+    ctx.shadowBlur = 10 + 14 * pulse;
+    ctx.beginPath();
+    ctx.arc(x, y, r0 * (1 + 0.18 * pulse), 0, Math.PI * 2);
+    ctx.stroke();
+    // Closing ring: lands on the target exactly at the mark.
+    if (raw < db.mark) {
+      const r = r0 + (l.w * 0.62 - r0) * (1 - u);
+      ctx.strokeStyle = `rgba(230,60,40,${0.25 + 0.6 * u})`;
+      ctx.lineWidth = 2.5;
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    // Beat pips: how many are left.
+    const done = Math.min(DEATHBLOW_BEATS, Math.floor((raw - db.t0) / beat));
+    for (let i = 0; i < DEATHBLOW_BEATS; i++) {
+      const px = x + (i - (DEATHBLOW_BEATS - 1) / 2) * l.w * 0.05;
+      ctx.fillStyle = i < done ? "rgba(255,214,120,0.95)" : "rgba(255,214,120,0.25)";
+      ctx.beginPath();
+      ctx.arc(px, y + l.w * 0.1, l.w * 0.009, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  /** The Deathblow's gold cut, top left to bottom right through the guardian. */
+  private drawCleave(ctx: CanvasRenderingContext2D, l: Layout, c: Cache, now: number): void {
+    const cl = this.cleave;
+    if (!cl) return;
+    const u = (now - cl.start) / 700;
+    if (u >= 1) {
+      this.cleave = null;
+      return;
+    }
+    if (u < 0) return;
+    const sx = l.w * 0.12;
+    const sy = c.headY - l.w * 0.12;
+    const tx = l.w * 0.9;
+    const ty = l.gy - l.w * 0.18;
+    const k = easeOutCubic(Math.min(1, u * 3));
+    const ex = sx + (tx - sx) * k;
+    const ey = sy + (ty - sy) * k;
+    const len = Math.hypot(tx - sx, ty - sy);
+    const nx = -(ty - sy) / len;
+    const ny = (tx - sx) / len;
+    const half = l.w * 0.03 * (1 - u * 0.8);
+    ctx.save();
+    ctx.globalAlpha = (1 - u) * this.fxA;
+    ctx.fillStyle = "rgba(255,236,190,1)";
+    ctx.shadowColor = "rgba(255,190,80,1)";
+    ctx.shadowBlur = 28;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo((sx + ex) / 2 + nx * half, (sy + ey) / 2 + ny * half);
+    ctx.lineTo(ex, ey);
+    ctx.lineTo((sx + ex) / 2 - nx * half, (sy + ey) / 2 - ny * half);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
   private drawSlash(ctx: CanvasRenderingContext2D, l: Layout, now: number): void {
     const sl = this.slash;
     if (!sl) return;
@@ -934,14 +1117,14 @@ const FRONT_FOG: readonly FogBlob[] = [
   { y: 1.02, size: 2.6, speed: 0.018, alpha: 0.22, phase: 0.9 },
 ];
 
-function drawEmbers(ctx: CanvasRenderingContext2D, l: Layout, t: number): void {
+function drawEmbers(ctx: CanvasRenderingContext2D, l: Layout, t: number, level = 1): void {
   for (let i = 0; i < 12; i++) {
     const seed = i * 12.9898;
     const period = 9 + (i % 5) * 2.3;
     const u = (t / period + (Math.sin(seed) * 0.5 + 0.5)) % 1;
     const x = l.w * ((Math.sin(seed * 3.7) * 0.5 + 0.5) + Math.sin(t * 0.4 + i) * 0.02);
     const y = l.h * (1.02 - u * 0.75);
-    const a = Math.sin(u * Math.PI) * 0.55;
+    const a = Math.sin(u * Math.PI) * 0.55 * level;
     ctx.fillStyle = `rgba(255,${130 + (i % 3) * 30},60,${a})`;
     ctx.beginPath();
     ctx.arc(x, y, 0.8 + (i % 3) * 0.5, 0, Math.PI * 2);
@@ -1125,7 +1308,7 @@ function eyePositions(kind: SilhouetteKind, l: Layout, hy: number): Array<[numbe
  */
 function drawEyes(
   ctx: CanvasRenderingContext2D,
-  boss: Boss,
+  rgb: Rgb,
   u: number,
   eyes: ReadonlyArray<readonly [number, number]>,
   count: number,
@@ -1136,7 +1319,7 @@ function drawEyes(
   level: number,
 ): void {
   if (presence <= 0.02) return;
-  const [r, g, b] = boss.look.eye;
+  const [r, g, b] = rgb;
   const flicker = 0.88 + 0.12 * Math.sin(t * 2.3) * Math.sin(t * 0.7);
   const a = Math.min(1, presence * presence * flicker * (0.8 + 0.2 * menace) * level);
   ctx.save();

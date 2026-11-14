@@ -2,6 +2,11 @@
  * Global tuning constants. Boss-specific values live in bosses.ts.
  */
 
+/** Player-facing name. Internal ids, seeds and storage keys keep "deflect". */
+export const GAME_NAME = "Dflect Everywhere";
+/** The two halves, for layouts that stack them (logo, OG image). */
+export const GAME_NAME_PARTS = ["Dflect", "Everywhere"] as const;
+
 /** Local date of puzzle #1 (YYYY-MM-DD). */
 export const LAUNCH_DATE = "2026-11-10";
 
@@ -34,6 +39,22 @@ export const TARGET_RUN_MS = 120_000;
 export const WARMUP_ROUNDS = 1;
 /** A feint OR a stall, never both in one strike. */
 export const MAX_DECEPTIVE_PER_ROUND = 1;
+
+/**
+ * Second phase. From this round (0-based) on, the guardian draws from its
+ * phase-two moveset, swings a little faster and lies a little more. The round
+ * before it gets an extra beat (PHASE_SHIFT_MS) for the transformation.
+ */
+export const PHASE_TWO_ROUND = Math.floor(ROUNDS_PER_RUN / 2);
+export const HAS_PHASE_TWO = PHASE_TWO_ROUND > WARMUP_ROUNDS && PHASE_TWO_ROUND < ROUNDS_PER_RUN;
+export const PHASE_SHIFT_MS = 1800;
+export const PHASE_TWO_SWING = 0.94;
+export const PHASE_TWO_DECEIT = 1.25;
+/** True when `round` (0-based) is the first round of phase two. */
+export const isPhaseShift = (round: number) => HAS_PHASE_TWO && round === PHASE_TWO_ROUND;
+
+/** Chance per round (outside the forced slots) that the day's signature move is used. */
+export const SIGNATURE_CHANCE = 0.3;
 
 /**
  * Stall (delayed swing): mid-swing the blade hangs, then snaps through.

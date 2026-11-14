@@ -1,4 +1,4 @@
-import { MISS_WINDOW_MS, PERFECT_WINDOW_MS } from "./config";
+import { GAME_NAME, MISS_WINDOW_MS, PERFECT_WINDOW_MS } from "./config";
 import {
   biasOf,
   biasSentence,
@@ -13,6 +13,8 @@ export interface ShareImageInput {
   bossName: string;
   results: readonly StrikeResult[];
   siteLabel: string;
+  /** True when the Deathblow landed: the card says so. */
+  deathblow?: boolean;
 }
 
 export function scoreColor(score: number): string {
@@ -67,8 +69,8 @@ export async function renderShareImage(input: ShareImageInput): Promise<File | n
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
   ctx.fillStyle = "#d4af37";
-  ctx.font = `700 44px ${display}`;
-  ctx.fillText("D E F L E C T", 70, 96);
+  ctx.font = `700 38px ${display}`;
+  ctx.fillText(GAME_NAME.toUpperCase(), 70, 96);
   ctx.textAlign = "right";
   ctx.fillStyle = "#a39cae";
   ctx.font = `400 34px ${body}`;
@@ -98,6 +100,11 @@ export async function renderShareImage(input: ShareImageInput): Promise<File | n
   ctx.fillStyle = "#a39cae";
   ctx.font = `italic 400 36px ${body}`;
   ctx.fillText(biasSentence(biasOf(input.results)), tx, 362);
+  if (input.deathblow) {
+    ctx.fillStyle = "#f3dc9a";
+    ctx.font = `700 30px ${display}`;
+    ctx.fillText("⚔ DEATHBLOW", tx, 406);
+  }
 
   // Timeline
   const x0 = 110;
@@ -152,5 +159,5 @@ export async function renderShareImage(input: ShareImageInput): Promise<File | n
     canvas.toBlob(resolve, "image/png"),
   );
   if (!blob) return null;
-  return new File([blob], `deflect-${input.puzzle}.png`, { type: "image/png" });
+  return new File([blob], `dflect-everywhere-${input.puzzle}.png`, { type: "image/png" });
 }

@@ -192,7 +192,11 @@ export type KickKind =
   | "late"
   | "unanswered"
   /** A strike ended without a hit (voided). Visual no-op, ends engagement. */
-  | "release";
+  | "release"
+  /** The stagger meter broke: the guardian slumps and heaves until the Deathblow. */
+  | "stagger"
+  /** The Deathblow landed: a heavy recoil, eyes go out, then slowly return. */
+  | "deathblow";
 
 export interface KickFx {
   /** Fractions of width / height. */
@@ -256,6 +260,24 @@ export function kickFx(kind: KickKind | null, dt: number, out: KickFx): KickFx {
     }
     case "release":
       break;
+    case "stagger": {
+      // In over 300 ms, held through the Deathblow beats (about 1.7 s), out by 2.3 s.
+      const env =
+        dt < 300 ? smoothstep(0, 300, dt) : dt < 1800 ? 1 : 1 - smoothstep(1800, 2300, dt);
+      out.dy = 0.016 * env;
+      out.scale = 1 - 0.012 * env;
+      out.breathBoost = 1.4 * env;
+      out.eye = 1 - 0.55 * env;
+      break;
+    }
+    case "deathblow": {
+      const r = dt < 600 ? Math.pow(1 - dt / 600, 2) : 0;
+      out.dx = 0.012 * r;
+      out.dy = 0.012 * r;
+      out.scale = 1 - 0.018 * r;
+      out.eye = dt < 900 ? 0.05 : dt < 3000 ? lerp(0.05, 1, smoothstep(900, 3000, dt)) : 1;
+      break;
+    }
   }
   return out;
 }
@@ -642,7 +664,7 @@ export class LivingPortrait {
   /** A discrete fight event. The only way the fight ever reaches the portrait. */
   kick(kind: KickKind, now: number): void {
     if (this.reduced) return;
-    this.engaged = kind === "strikeStart";
+    this.engaged = kind === "strikeStart" || kind === "stagger";
     if (kind === "release") {
       this.kickKind = null;
       return;

@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Cinzel, EB_Garamond } from "next/font/google";
+import { GAME_NAME } from "@/game/config";
 import { pitch } from "@/game/copy";
 import "./globals.css";
 
@@ -27,19 +28,19 @@ const description = pitch();
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
-  title: "Deflect: the daily parry",
+  title: `${GAME_NAME}: the daily parry`,
   description,
-  applicationName: "Deflect",
+  applicationName: GAME_NAME,
   openGraph: {
-    title: "Deflect: the daily parry",
+    title: `${GAME_NAME}: the daily parry`,
     description,
-    siteName: "Deflect",
+    siteName: GAME_NAME,
     type: "website",
     url: "/",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Deflect: the daily parry",
+    title: `${GAME_NAME}: the daily parry`,
     description,
     creator: "@avi21b",
   },

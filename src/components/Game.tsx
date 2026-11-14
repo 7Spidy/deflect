@@ -15,6 +15,7 @@ import {
   weekdayOf,
 } from "@/game/daily";
 import type { StrikeResult } from "@/game/scoring";
+import { runFinished, type DeathblowResult } from "@/game/stagger";
 import { applyRun, emptyStats, type Stats } from "@/game/stats";
 import {
   clearDaily,
@@ -34,6 +35,25 @@ import GuardianPortrait from "./GuardianPortrait";
 import Results from "./Results";
 import StatsModal from "./StatsModal";
 import { Footer, Logo, MuteToggle } from "./ui";
+import { MOVES, planDay } from "@/game/moves";
+
+/** What makes today's fight unlike last week's: the omen and the favoured move. */
+function TodayCard({ boss, date }: { boss: Boss; date: string }) {
+  const day = planDay(dailySeed(date), boss);
+  const move = MOVES[day.signature];
+  return (
+    <div className="mt-3 flex flex-col items-center gap-1 border-y border-gold/25 px-4 py-2 text-lg">
+      <p className="text-ash">
+        <span className="font-display tracking-[0.16em] text-gold-bright uppercase">{day.omen.name}</span>
+        {" · "}
+        <span className="italic">{day.omen.line}</span>
+      </p>
+      <p className="text-ash">
+        Favours <span className="text-bone">{move.name}</span>: <span className="italic">{move.hint}.</span>
+      </p>
+    </div>
+  );
+}
 
 type Screen = "loading" | "title" | "howto" | "encounter" | "results";
 
@@ -53,6 +73,7 @@ interface Run {
   boss: Boss;
   seed: string;
   initialResults: StrikeResult[];
+  initialDeathblow: DeathblowResult | null;
   attempts: number[];
 }
 
@@ -60,6 +81,7 @@ interface Finished {
   mode: "daily" | "practice";
   boss: Boss;
   results: StrikeResult[];
+  deathblow: DeathblowResult | null;
 }
 
 export default function Game() {
@@ -92,7 +114,7 @@ export default function Game() {
     setStats(loadStats());
     setMuted(loadMuted());
     if (record.done) {
-      setFinished({ mode: "daily", boss, results: record.results });
+      setFinished({ mode: "daily", boss, results: record.results, deathblow: record.deathblow ?? null });
       setScreen("results");
     } else {
       setScreen("title");
@@ -123,6 +145,7 @@ export default function Game() {
       boss: boot.boss,
       seed: dailySeed(boot.date),
       initialResults: rec.results,
+      initialDeathblow: rec.deathblow ?? null,
       attempts: rec.attempts,
     });
     setScreen("encounter");
@@ -145,6 +168,7 @@ export default function Game() {
       boss: BOSSES[Math.floor(Math.random() * BOSSES.length)],
       seed: `practice:${Date.now()}:${Math.random().toString(36).slice(2)}`,
       initialResults: [],
+      initialDeathblow: null,
       attempts: new Array<number>(STRIKES_PER_RUN).fill(0),
     });
     setScreen("encounter");
@@ -160,11 +184,22 @@ export default function Game() {
     if (run?.mode !== "daily" || !boot) return;
     updateDaily((rec) => {
       const results = [...rec.results.slice(0, index), result];
-      return { ...rec, results, inProgress: null, done: results.length >= STRIKES_PER_RUN };
+      return { ...rec, results, inProgress: null, done: runFinished(results, rec.deathblow) };
     });
+    recordIfDone();
+  };
+
+  // The Deathblow is saved like a strike: once played it is never replayed.
+  const onDeathblow = (result: DeathblowResult) => {
+    if (run?.mode !== "daily" || !boot) return;
+    updateDaily((rec) => ({ ...rec, deathblow: result, done: runFinished(rec.results, result) }));
+    recordIfDone();
+  };
+
+  const recordIfDone = () => {
     const rec = dailyRef.current;
-    if (rec?.done && !boot.override) {
-      const next = applyRun(loadStats(), boot.date, rec.results);
+    if (rec?.done && boot && !boot.override) {
+      const next = applyRun(loadStats(), boot.date, rec.results, rec.deathblow?.landed === true);
       saveStats(next);
       setStats(next);
     }
@@ -175,9 +210,9 @@ export default function Game() {
     updateDaily((rec) => ({ ...rec, attempts, inProgress: null }));
   };
 
-  const onComplete = (results: StrikeResult[]) => {
+  const onComplete = (results: StrikeResult[], deathblow: DeathblowResult | null) => {
     if (!run) return;
-    setFinished({ mode: run.mode, boss: run.boss, results });
+    setFinished({ mode: run.mode, boss: run.boss, results, deathblow });
     setRun(null);
     setScreen("results");
   };
@@ -189,7 +224,7 @@ export default function Game() {
     setRun(null);
     if (run?.mode === "daily" && rec?.done) {
       // The last strike landed while the dialog was open: there is nothing to continue.
-      setFinished({ mode: "daily", boss: boot?.boss ?? run.boss, results: rec.results });
+      setFinished({ mode: "daily", boss: boot?.boss ?? run.boss, results: rec.results, deathblow: rec.deathblow ?? null });
       setScreen("results");
       return;
     }
@@ -223,7 +258,7 @@ export default function Game() {
               {boot.boss.art && (
                 <div
                   aria-hidden="true"
-                  className="pointer-events-none absolute top-[-6rem] left-1/2 -z-10 h-[26rem] w-[22rem] -translate-x-1/2 overflow-hidden opacity-40 [mask-image:linear-gradient(to_bottom,black_40%,transparent)]"
+                  className="pointer-events-none absolute top-[-6rem] left-1/2 -z-10 h-[26rem] w-[22rem] -translate-x-1/2 overflow-hidden opacity-40 [mask-image:radial-gradient(ellipse_50%_50%_at_50%_44%,black_58%,transparent_100%)]"
                 >
                   <GuardianPortrait
                     boss={boot.boss}
@@ -239,6 +274,7 @@ export default function Game() {
                 {boot.boss.name}
               </h2>
               <p className="text-xl text-ash italic">{boot.boss.epitaph}</p>
+              <TodayCard boss={boot.boss} date={boot.date} />
             </section>
 
             <div className="relative flex flex-col items-center gap-3">
@@ -247,7 +283,9 @@ export default function Game() {
               </button>
               {partial && (
                 <p className="text-lg text-ash">
-                  Round {roundOf(daily?.results.length ?? 0) + 1} of {ROUNDS_PER_RUN} awaits.
+                  {(daily?.results.length ?? 0) >= STRIKES_PER_RUN
+                    ? "The guardian is staggered. The Deathblow awaits."
+                    : `Round ${roundOf(daily?.results.length ?? 0) + 1} of ${ROUNDS_PER_RUN} awaits.`}
                 </p>
               )}
               <div className="flex gap-2">
@@ -275,6 +313,10 @@ export default function Game() {
               Tap once, the instant steel meets the <span className="text-gold-bright">gold line</span>.
             </li>
             <li>{howToStrikes()}</li>
+            <li>
+              Deflect well to fill its <span className="text-gold-bright">stagger</span>. Break it, then strike on the
+              fourth heartbeat.
+            </li>
           </ol>
           <button
             type="button"
@@ -298,6 +340,7 @@ export default function Game() {
           seed={run.seed}
           mode={run.mode}
           initialResults={run.initialResults}
+          initialDeathblow={run.initialDeathblow}
           attempts={run.attempts}
           debug={boot.debug}
           audio={audio()}
@@ -306,6 +349,7 @@ export default function Game() {
           onStrikeStart={onStrikeStart}
           onResult={onResult}
           onVoid={onVoid}
+          onDeathblow={onDeathblow}
           onComplete={onComplete}
           onCancel={onCancel}
         />
@@ -318,10 +362,13 @@ export default function Game() {
           puzzle={boot.puzzle}
           date={boot.date}
           results={finished.results}
+          deathblow={finished.deathblow}
           hasDailyResult={daily?.done ?? false}
           onPractice={startPractice}
           onShowDaily={() => {
-            if (daily?.done) setFinished({ mode: "daily", boss: boot.boss, results: daily.results });
+            if (daily?.done) {
+              setFinished({ mode: "daily", boss: boot.boss, results: daily.results, deathblow: daily.deathblow ?? null });
+            }
           }}
           onStats={() => setShowStats(true)}
         />

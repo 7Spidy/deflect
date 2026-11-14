@@ -19,6 +19,8 @@ export interface Stats {
   tapCount: number;
   absOffsetSum: number;
   signedOffsetSum: number;
+  /** Deathblows landed, lifetime. */
+  deathblows: number;
 }
 
 export function emptyStats(): Stats {
@@ -31,6 +33,7 @@ export function emptyStats(): Stats {
     tapCount: 0,
     absOffsetSum: 0,
     signedOffsetSum: 0,
+    deathblows: 0,
   };
 }
 
@@ -39,6 +42,7 @@ export function applyRun(
   stats: Stats,
   date: string,
   results: readonly StrikeResult[],
+  deathblowLanded = false,
 ): Stats {
   if (stats.lastCompleted === date) return stats;
   const consecutive =
@@ -56,6 +60,7 @@ export function applyRun(
     tapCount: stats.tapCount + taps.length,
     absOffsetSum: stats.absOffsetSum + taps.reduce((s, r) => s + Math.abs(r.offset), 0),
     signedOffsetSum: stats.signedOffsetSum + taps.reduce((s, r) => s + r.offset, 0),
+    deathblows: (stats.deathblows ?? 0) + (deathblowLanded ? 1 : 0),
   };
 }
 

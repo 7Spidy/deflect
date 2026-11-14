@@ -1,13 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { GameAudio } from "@/game/audio";
 import type { Boss } from "@/game/bosses";
-import { ROUNDS_PER_RUN, STRIKES_PER_ROUND } from "@/game/config";
+import { isPhaseShift, ROUNDS_PER_RUN, STRIKES_PER_ROUND } from "@/game/config";
 import { Engine } from "@/game/engine";
+import { MOVES, planDay } from "@/game/moves";
 import { runScore, type StrikeResult } from "@/game/scoring";
+import { staggerTrack, type DeathblowResult, type StaggerState } from "@/game/stagger";
 import LeaveDialog from "./LeaveDialog";
 import RoundBar from "./RoundBar";
+import StaggerBar from "./StaggerBar";
 import { MuteToggle } from "./ui";
 
 export interface EncounterProps {
@@ -15,6 +18,8 @@ export interface EncounterProps {
   seed: string;
   mode: "daily" | "practice";
   initialResults: StrikeResult[];
+  /** The Deathblow, if this run already played it. */
+  initialDeathblow: DeathblowResult | null;
   attempts: number[];
   debug: boolean;
   audio: GameAudio;
@@ -23,7 +28,8 @@ export interface EncounterProps {
   onStrikeStart: (index: number) => void;
   onResult: (index: number, result: StrikeResult) => void;
   onVoid: (index: number, attempts: number[]) => void;
-  onComplete: (results: StrikeResult[]) => void;
+  onDeathblow: (result: DeathblowResult) => void;
+  onComplete: (results: StrikeResult[], deathblow: DeathblowResult | null) => void;
   /** The player left the fight. Daily progress is already saved by onResult/onVoid. */
   onCancel: () => void;
 }
@@ -39,6 +45,16 @@ interface Banner {
   id: number;
   round: number;
   avg: number;
+  /** Name of the next round's move: the guardian's telegraph. */
+  next: string | null;
+  leaving: boolean;
+}
+
+/** Shown while the guardian turns into its second phase. */
+interface PhaseCard {
+  id: number;
+  line: string;
+  rgb: readonly [number, number, number];
   leaving: boolean;
 }
 
@@ -87,6 +103,11 @@ export default function Encounter(props: EncounterProps) {
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [voided, setVoided] = useState(false);
   const [banner, setBanner] = useState<Banner | null>(null);
+  const [phaseCard, setPhaseCard] = useState<PhaseCard | null>(null);
+  const [stagger, setStagger] = useState<StaggerState>(() => staggerTrack(props.initialResults));
+  const [deathblow, setDeathblow] = useState<DeathblowResult | null>(props.initialDeathblow);
+  const [staggered, setStaggered] = useState(false);
+  const day = useMemo(() => planDay(props.seed, props.boss), [props.seed, props.boss]);
   const [dialogOpen, setDialogOpen] = useState(false);
 
   // Hold the fight and ask. A tapped strike that is already in flight is not voided.
@@ -108,7 +129,9 @@ export default function Encounter(props: EncounterProps) {
     const canvas = canvasRef.current;
     if (!surface || !canvas) return;
     const p = propsRef.current;
+    const plan = planDay(p.seed, p.boss);
     const collected: StrikeResult[] = [...p.initialResults];
+    let blow: DeathblowResult | null = p.initialDeathblow;
     let feedbackId = 0;
     let bannerId = 0;
     const timers = new Set<number>();
@@ -127,6 +150,8 @@ export default function Encounter(props: EncounterProps) {
       startIndex: p.initialResults.length,
       attempts: p.attempts,
       priorTrueStreak: trailingTrue(p.initialResults),
+      stagger: staggerTrack(p.initialResults),
+      deathblow: p.initialDeathblow,
       reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
       audio: p.audio,
       onStrikeStart: (index) => {
@@ -136,7 +161,11 @@ export default function Encounter(props: EncounterProps) {
         setActive(index);
         // The round banner fades as the next strike begins.
         setBanner((b) => (b ? { ...b, leaving: true } : b));
-        later(() => setBanner(null), 400);
+        setPhaseCard((c) => (c ? { ...c, leaving: true } : c));
+        later(() => {
+          setBanner(null);
+          setPhaseCard(null);
+        }, 400);
         propsRef.current.onStrikeStart(index);
       },
       onResult: (index, result) => {
@@ -150,8 +179,16 @@ export default function Encounter(props: EncounterProps) {
         const from = round * STRIKES_PER_ROUND;
         const mine = collected.slice(from, from + STRIKES_PER_ROUND);
         const id = ++bannerId;
-        setBanner({ id, round: round + 1, avg: runScore(mine), leaving: false });
-        later(() => setBanner((b) => (b && b.id === id ? { ...b, leaving: true } : b)), 1400);
+        const nextRound = round + 1;
+        const next = nextRound < ROUNDS_PER_RUN ? MOVES[plan.moves[nextRound]].name : null;
+        const shift = isPhaseShift(nextRound);
+        setBanner({ id, round: round + 1, avg: runScore(mine), next, leaving: false });
+        later(() => setBanner((b) => (b && b.id === id ? { ...b, leaving: true } : b)), shift ? 1700 : 2100);
+        if (shift) {
+          // The guardian turns (see PHASE_PEAK in arena.ts): its line takes the banner's place.
+          const boss = propsRef.current.boss;
+          later(() => setPhaseCard({ id, line: boss.phaseTwo.line, rgb: boss.phaseTwo.eye, leaving: false }), 2500);
+        }
       },
       onVoid: (index, attempts) => {
         setActive(null);
@@ -159,7 +196,34 @@ export default function Encounter(props: EncounterProps) {
         setVoided(true);
         propsRef.current.onVoid(index, attempts);
       },
-      onComplete: () => propsRef.current.onComplete([...collected]),
+      onStagger: (st) => setStagger(st),
+      onDeathblowStart: () => {
+        setIntro(false);
+        setVoided(false);
+        setFeedback(null);
+        setBanner(null);
+        setPhaseCard(null);
+        setStaggered(true);
+      },
+      onDeathblow: (result) => {
+        blow = result;
+        setStaggered(false);
+        setDeathblow(result);
+        const ms = result.offset === null ? null : Math.round(Math.abs(result.offset));
+        setFeedback({
+          id: ++feedbackId,
+          title: result.landed ? "Deathblow" : "It recovers",
+          detail:
+            ms === null
+              ? "No tap"
+              : ms === 0
+                ? "0 ms, dead on"
+                : `${ms} ms ${(result.offset ?? 0) < 0 ? "early" : "late"}`,
+          tone: result.landed ? "text-gold-bright" : "text-blood",
+        });
+        propsRef.current.onDeathblow(result);
+      },
+      onComplete: () => propsRef.current.onComplete([...collected], blow),
     });
     engineRef.current = engine;
     engine.start();
@@ -271,6 +335,14 @@ export default function Encounter(props: EncounterProps) {
 
         <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-col items-center gap-2 px-14 pt-[max(env(safe-area-inset-top),0.9rem)]">
           <RoundBar boss={boss} practice={mode === "practice"} results={results} active={active} />
+          <StaggerBar state={stagger} deathblow={deathblow} />
+          {intro && (
+            <p className="fade-in mt-1 text-center text-lg leading-snug text-ash [text-shadow:0_1px_8px_rgba(0,0,0,0.9)]">
+              <span className="font-display tracking-[0.14em] text-gold uppercase">{day.omen.name}</span>
+              <br />
+              <span className="italic">{day.omen.line}</span>
+            </p>
+          )}
         </div>
 
         <div className="absolute top-[max(env(safe-area-inset-top),0.5rem)] left-2" data-notap>
@@ -292,7 +364,7 @@ export default function Encounter(props: EncounterProps) {
         {banner && (
           <div
             key={banner.id}
-            className={`pointer-events-none absolute inset-x-0 top-[40%] flex flex-col items-center text-center transition-opacity duration-300 ${
+            className={`pointer-events-none absolute inset-x-0 top-[40%] flex flex-col items-center text-center transition-opacity duration-300 [text-shadow:0_1px_10px_rgba(0,0,0,0.95),0_0_2px_rgba(0,0,0,0.9)] ${
               banner.leaving ? "opacity-0" : "opacity-100"
             }`}
             aria-live="polite"
@@ -301,6 +373,39 @@ export default function Encounter(props: EncounterProps) {
               Round {banner.round} of {ROUNDS_PER_RUN}
             </p>
             <p className="fade-in text-xl text-bone tabular-nums">avg {banner.avg}</p>
+            {banner.next && (
+              <p className="fade-in mt-3 text-lg text-ash italic">
+                Next <span className="not-italic text-bone">·</span> {banner.next}
+              </p>
+            )}
+          </div>
+        )}
+
+        {staggered && (
+          <div
+            className="pointer-events-none absolute inset-x-0 top-[40%] flex flex-col items-center px-6 text-center [text-shadow:0_1px_10px_rgba(0,0,0,0.95)]"
+            aria-live="assertive"
+          >
+            <p className="fade-in font-display text-3xl font-bold tracking-[0.2em] text-blood uppercase">Staggered</p>
+            <p className="fade-in mt-1 text-xl text-bone italic">Strike on the fourth heartbeat.</p>
+          </div>
+        )}
+
+        {phaseCard && (
+          <div
+            key={`phase-${phaseCard.id}`}
+            className={`pointer-events-none absolute inset-x-0 top-[40%] flex flex-col items-center px-6 text-center [text-shadow:0_1px_10px_rgba(0,0,0,0.95)] transition-opacity duration-300 ${
+              phaseCard.leaving ? "opacity-0" : "opacity-100"
+            }`}
+            aria-live="polite"
+          >
+            <p className="fade-in font-display text-base tracking-[0.3em] text-ash uppercase">Phase two</p>
+            <p
+              className="fade-in mt-1 font-display text-2xl font-bold tracking-[0.08em] uppercase"
+              style={{ color: `rgb(${phaseCard.rgb.join(",")})`, textShadow: `0 0 18px rgba(${phaseCard.rgb.join(",")},0.55)` }}
+            >
+              {phaseCard.line}
+            </p>
           </div>
         )}
 

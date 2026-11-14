@@ -1,3 +1,21 @@
+import type { InterludeKind } from "./bosses";
+
+import { BEAT_LAND as BEAT_AT, PHASE_PEAK as PHASE_AT } from "./arena";
+import { STRIKES_PER_ROUND } from "./config";
+import { motifNotes, type Move } from "./moves";
+
+/** Root note of each guardian's motif (Hz). Low and different per guardian. */
+const MOTIF_ROOT: Record<InterludeKind, number> = {
+  coins: 220,
+  thorns: 246.9,
+  stars: 261.6,
+  candles: 233.1,
+  bell: 196,
+  roots: 174.6,
+  dark: 146.8,
+};
+
+
 /**
  * All sound is synthesised with the Web Audio API. Audio is feedback only:
  * nothing in the timing rules depends on it.
@@ -333,6 +351,167 @@ export class GameAudio {
       gl.connect(gg).connect(master);
       gl.start(at);
       gl.stop(at + 0.14);
+    }
+  }
+
+  /** A plain decaying partial, scheduled `at` seconds from now. */
+  private tone(
+    freq: number,
+    at: number,
+    level: number,
+    decay: number,
+    type: OscillatorType = "sine",
+    glideTo?: number,
+  ): void {
+    const { ctx, master } = this;
+    if (!ctx || !master) return;
+    const t = ctx.currentTime + at;
+    const o = ctx.createOscillator();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, t);
+    if (glideTo) o.frequency.exponentialRampToValueAtTime(glideTo, t + decay);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(level, t + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+    o.connect(g).connect(master);
+    o.start(t);
+    o.stop(t + decay + 0.05);
+  }
+
+  /** Filtered noise: a breath, a puff, a rasp. */
+  private hiss(
+    at: number,
+    dur: number,
+    level: number,
+    type: BiquadFilterType,
+    freq: number,
+    freqTo?: number,
+  ): void {
+    const { ctx, master } = this;
+    const src = this.noiseSource();
+    if (!ctx || !master || !src) return;
+    const t = ctx.currentTime + at;
+    const f = ctx.createBiquadFilter();
+    f.type = type;
+    f.frequency.setValueAtTime(freq, t);
+    if (freqTo) f.frequency.exponentialRampToValueAtTime(freqTo, t + dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(level, t + dur * 0.25);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(f).connect(g).connect(master);
+    src.start(t);
+    src.stop(t + dur + 0.05);
+  }
+
+  /**
+   * The guardian's between-round beat, quiet under the drone. Timed to the
+   * moment the scene's beat lands. With `phaseShift`, a low swell follows.
+   */
+  interlude(kind: InterludeKind, phaseShift = false): void {
+    if (!this.ctx || !this.master) return;
+    const at = BEAT_AT[kind];
+    switch (kind) {
+      case "coins":
+        // A coin lands, bounces once, settles.
+        this.tone(2350, at, 0.07, 0.35);
+        this.tone(3480, at, 0.04, 0.25);
+        this.tone(2350, at + 0.16, 0.035, 0.2);
+        this.tone(3480, at + 0.27, 0.02, 0.15);
+        break;
+      case "thorns":
+        this.hiss(at - 0.35, 0.5, 0.05, "bandpass", 900, 2600);
+        this.tone(180, at, 0.05, 0.25, "sawtooth", 120);
+        break;
+      case "stars":
+        this.tone(1318.5, at, 0.04, 1.6);
+        this.tone(1975.5, at + 0.12, 0.025, 1.4);
+        break;
+      case "candles":
+        this.hiss(at, 0.35, 0.08, "lowpass", 700, 240);
+        this.tone(660, at + 0.05, 0.015, 0.6);
+        break;
+      case "bell": {
+        // An old, slightly cracked bell: inharmonic partials, long tail.
+        const base = 196;
+        for (const [r, l, d] of [
+          [0.5, 0.07, 3.2],
+          [1, 0.09, 2.6],
+          [1.19, 0.05, 2.1],
+          [1.51, 0.04, 1.8],
+          [2.0, 0.035, 1.5],
+          [2.74, 0.02, 1.1],
+        ] as const) {
+          this.tone(base * r * (1 + (Math.random() - 0.5) * 0.003), at, l, d);
+        }
+        break;
+      }
+      case "roots":
+        for (let i = 0; i < 4; i++) this.tone(900 + i * 140, at + i * 0.09, 0.025, 0.06, "square");
+        this.tone(70, at, 0.08, 0.7, "sine", 48);
+        break;
+      case "dark":
+        // A candle pinched out, then a breath that leaves the room colder.
+        this.hiss(at, 0.18, 0.06, "highpass", 2000);
+        this.hiss(at + 0.1, 1.1, 0.05, "lowpass", 900, 140);
+        if (this.drone) this.dip(900);
+        break;
+    }
+    if (phaseShift) {
+      this.tone(41, PHASE_AT - 0.9, 0.22, 2.4, "sine", 33);
+      this.tone(98, PHASE_AT, 0.09, 2.2, "triangle", 92);
+      this.tone(146.8, PHASE_AT + 0.02, 0.05, 1.8);
+      this.hiss(PHASE_AT - 0.7, 1.4, 0.06, "lowpass", 300, 90);
+    }
+  }
+
+  /**
+   * A move's motif (see motifNotes): one muted mallet note per strike, in the
+   * guardian's own key, `at` seconds from now. Played in the round break
+   * before the move, and near the end of the reveal for the first round.
+   */
+  motif(move: Move, kind: InterludeKind, at: number): void {
+    if (!this.ctx || !this.master) return;
+    const root = MOTIF_ROOT[kind];
+    for (const note of motifNotes(move, STRIKES_PER_ROUND)) {
+      const f = root * Math.pow(2, note.semis / 12);
+      const t = at + note.at;
+      this.tone(f, t, 0.055, 0.32, "triangle");
+      this.tone(f * 2.76, t, 0.012, 0.12);
+      this.tone(f / 2, t, 0.04, 0.16, "sine", f / 2.6);
+    }
+  }
+
+  /** The Deathblow count: heartbeats, the last one on the mark (`lead` seconds away). */
+  heartbeats(lead: number, beats = 4): void {
+    if (!this.ctx || !this.master) return;
+    const step = lead / beats;
+    for (let i = 1; i <= beats; i++) {
+      const t = i * step;
+      const last = i === beats;
+      this.tone(last ? 62 : 54, t - 0.09, last ? 0.2 : 0.14, 0.18, "sine", 38);
+      this.tone(last ? 70 : 60, t, last ? 0.28 : 0.18, 0.26, "sine", 40);
+    }
+  }
+
+  /** Deathblow outcome: a ringing gong and a deep cut, or a dull rebound. */
+  deathblow(landed: boolean): void {
+    if (!this.ctx || !this.master) return;
+    if (landed) {
+      this.crack();
+      for (const [r, l, d] of [
+        [1, 0.16, 3.4],
+        [2.01, 0.08, 2.6],
+        [2.98, 0.05, 2.0],
+        [4.1, 0.03, 1.4],
+      ] as const) {
+        this.tone(110 * r, 0.02, l, d);
+      }
+      this.tone(55, 0, 0.3, 1.6, "sine", 36);
+    } else {
+      this.thud();
+      this.tone(90, 0.05, 0.12, 0.8, "sawtooth", 60);
     }
   }
 }

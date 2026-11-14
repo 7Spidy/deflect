@@ -6,10 +6,15 @@ import {
   FEINT_DURATION_MS,
   FEINT_FRACTION,
   FEINT_TAIL_MS,
+  GAME_NAME,
+  HAS_PHASE_TWO,
   isRoundEnd,
   LAUNCH_DATE,
   MAX_DECEPTIVE_PER_ROUND,
+  PHASE_SHIFT_MS,
+  PHASE_TWO_ROUND,
   RAISE_MS,
+  ROUND_BREAK_MS,
   roundOf,
   ROUNDS_PER_RUN,
   STALL_AT_FRACTION,
@@ -55,7 +60,18 @@ import {
   tiltEnvelope,
   warpDx,
 } from "../living";
-import { PACING_FLOOR_MS, simulateRunMs } from "../pacing";
+import {
+  isPhaseTwo,
+  motifNotes,
+  MOVES,
+  omenFor,
+  OMENS,
+  planDay,
+  roundRanges,
+  shapeAt,
+  type MoveId,
+} from "../moves";
+import { breakAfter, PACING_FLOOR_MS, simulateRunMs } from "../pacing";
 import { hashString, mulberry32 } from "../prng";
 import {
   bestWorst,
@@ -70,7 +86,7 @@ import {
   tierCounts,
   tierLine,
 } from "../scoring";
-import { buildShareText, SHARE_ROW } from "../share";
+import { buildShareText, DEATHBLOW_LANDED, DEATHBLOW_MISSED, roundScores, SHARE_ROW } from "../share";
 import {
   copyText,
   shareCapabilities,
@@ -78,6 +94,20 @@ import {
   shareText,
   type ShareEnv,
 } from "../shareClient";
+import {
+  DEATHBLOW_WINDOW_MS,
+  deathblowPending,
+  judgeDeathblow,
+  runFinished,
+  STAGGER_GAIN,
+  STAGGER_MAX,
+  STAGGER_ROUND_RECOVERY,
+  staggerGain,
+  staggerPeak,
+  staggerStep,
+  staggerTrack,
+  emptyStagger,
+} from "../stagger";
 import { applyRun, emptyStats, liveStreak } from "../stats";
 import { emptyDaily, loadDaily, pruneDaily } from "../storage";
 
@@ -164,16 +194,21 @@ describe("daily", () => {
 });
 
 describe("strike generator", () => {
-  it("keeps hold and swing inside each boss's ranges", () => {
+  it("keeps hold and swing inside each boss's ranges for the round (omen and phase applied)", () => {
     for (const boss of BOSSES) {
       for (const seed of seeds(300)) {
+        const day = planDay(seed, boss);
         const strikes = generateEncounter(seed, boss);
         expect(strikes).toHaveLength(STRIKES_PER_RUN);
         for (const s of strikes) {
-          expect(s.holdMs).toBeGreaterThanOrEqual(boss.holdMs[0]);
-          expect(s.holdMs).toBeLessThanOrEqual(boss.holdMs[1]);
-          expect(s.swingMs).toBeGreaterThanOrEqual(boss.swingMs[0]);
-          expect(s.swingMs).toBeLessThanOrEqual(boss.swingMs[1]);
+          const r = roundRanges(boss, day, roundOf(s.index));
+          expect(s.holdMs).toBeGreaterThanOrEqual(r.hold[0]);
+          expect(s.holdMs).toBeLessThanOrEqual(r.hold[1]);
+          expect(s.swingMs).toBeGreaterThanOrEqual(r.swing[0]);
+          expect(s.swingMs).toBeLessThanOrEqual(r.swing[1]);
+          // The omen and phase never push a boss far outside its own character.
+          expect(r.hold[1]).toBeLessThanOrEqual(boss.holdMs[1] * 1.2);
+          expect(r.swing[0]).toBeGreaterThanOrEqual(boss.swingMs[0] * 0.8);
         }
       }
     }
@@ -240,7 +275,8 @@ describe("strike generator", () => {
     const base = bossForWeekday(5);
     const short: Boss = { ...base, holdMs: [100, 400], feintRoundChance: 1, stallRoundChance: 0 };
     const shortStall: Boss = { ...short, stallRoundChance: 1 };
-    for (const seed of seeds(40)) {
+    // Days whose omen calms deception (Steady Hand) roll below 1; skip them here.
+    for (const seed of seeds(80).filter((s) => omenFor(s).deceitScale >= 1)) {
       expect(planDeception(seed, short).every((k) => k === null)).toBe(true);
       const plan = planDeception(seed, shortStall);
       expect(plan.includes("feint")).toBe(false);
@@ -346,9 +382,181 @@ describe("strike generator", () => {
   });
 });
 
+describe("daily variety", () => {
+  const datesFor = (weekday: number, n: number) => {
+    const out: string[] = [];
+    for (let d = 0; out.length < n; d++) {
+      const date = toDateString(new Date(2026, 10, 10 + d));
+      if (weekdayOf(date) === weekday) out.push(date);
+    }
+    return out;
+  };
+
+  it("plans the day deterministically from (seed, boss)", () => {
+    for (const boss of BOSSES) {
+      for (const seed of seeds(25)) expect(planDay(seed, boss)).toEqual(planDay(seed, boss));
+    }
+  });
+
+  it("opens with Measured Cuts and only uses the boss's own moves", () => {
+    for (const boss of BOSSES) {
+      const own = new Set<MoveId>([...boss.moves.one, ...boss.moves.two]);
+      for (const seed of seeds(200)) {
+        const day = planDay(seed, boss);
+        expect(day.moves).toHaveLength(ROUNDS_PER_RUN);
+        for (let r = 0; r < WARMUP_ROUNDS; r++) expect(day.moves[r]).toBe("measured");
+        expect(own.has(day.signature)).toBe(true);
+        day.moves.slice(WARMUP_ROUNDS).forEach((m) => expect(own.has(m)).toBe(true));
+      }
+    }
+  });
+
+  it("uses the signature at least twice, and never repeats any other move back to back", () => {
+    for (const boss of BOSSES) {
+      for (const seed of seeds(200)) {
+        const day = planDay(seed, boss);
+        expect(day.moves.filter((m) => m === day.signature).length).toBeGreaterThanOrEqual(2);
+        for (let r = WARMUP_ROUNDS + 1; r < ROUNDS_PER_RUN; r++) {
+          if (day.moves[r] !== day.signature) expect(day.moves[r]).not.toBe(day.moves[r - 1]);
+        }
+      }
+    }
+  });
+
+  it("shares one omen per date across every guardian, and every omen turns up", () => {
+    const seen = new Set<string>();
+    for (const seed of seeds(400)) {
+      const ids = BOSSES.map((b) => planDay(seed, b).omen.id);
+      expect(new Set(ids).size).toBe(1);
+      seen.add(ids[0]);
+    }
+    expect(seen.size).toBe(OMENS.length);
+  });
+
+  it("makes the same guardian's days differ (eight of each weekday, all distinct)", () => {
+    for (let wd = 0; wd < 7; wd++) {
+      const boss = bossForWeekday(wd);
+      const shapes = datesFor(wd, 8).map((d) => {
+        const day = planDay(dailySeed(d), boss);
+        return `${day.omen.id}|${day.moves.join(",")}`;
+      });
+      expect(new Set(shapes).size).toBe(8);
+    }
+  });
+
+  it("move shapes are audible in the timing (Quickening shortens, Lull waits last)", () => {
+    const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+    const holdsBySlot = (boss: Boss, move: MoveId) => {
+      const slots: number[][] = Array.from({ length: STRIKES_PER_ROUND }, () => []);
+      for (const seed of seeds(400)) {
+        const day = planDay(seed, boss);
+        const strikes = generateEncounter(seed, boss, [], day);
+        day.moves.forEach((m, r) => {
+          if (m !== move) return;
+          for (let k = 0; k < STRIKES_PER_ROUND; k++) {
+            const s = strikes[r * STRIKES_PER_ROUND + k];
+            if (!s.feint) slots[k].push(s.holdMs);
+          }
+        });
+      }
+      return slots.map(mean);
+    };
+    const keeper = bossForWeekday(1);
+    const q = holdsBySlot(keeper, "quicken");
+    expect(q[0]).toBeGreaterThan(q[STRIKES_PER_ROUND - 1] + 150);
+    const vesper = bossForWeekday(3);
+    const l = holdsBySlot(vesper, "lull");
+    expect(l[STRIKES_PER_ROUND - 1]).toBeGreaterThan(l[0] + 500);
+  });
+
+  it("a move with a tell always deceives in the same slot", () => {
+    const vesper = bossForWeekday(3);
+    let checked = 0;
+    for (const seed of seeds(300)) {
+      const day = planDay(seed, vesper);
+      const plan = planDeception(seed, vesper, day);
+      day.moves.forEach((m, r) => {
+        if (m !== "lull") return;
+        const kinds = plan.slice(r * STRIKES_PER_ROUND, (r + 1) * STRIKES_PER_ROUND);
+        kinds.forEach((k, slot) => {
+          if (k === null) return;
+          checked++;
+          expect(slot).toBe(STRIKES_PER_ROUND - 1);
+        });
+      });
+    }
+    expect(checked).toBeGreaterThan(20);
+  });
+
+  it("phase two swings faster and lies more, from PHASE_TWO_ROUND on", () => {
+    expect(HAS_PHASE_TWO).toBe(true);
+    const oswin = bossForWeekday(5);
+    const day = planDay("seed-1", oswin);
+    const before = roundRanges(oswin, day, PHASE_TWO_ROUND - 1);
+    const after = roundRanges(oswin, day, PHASE_TWO_ROUND);
+    expect(isPhaseTwo(PHASE_TWO_ROUND - 1)).toBe(false);
+    expect(isPhaseTwo(PHASE_TWO_ROUND)).toBe(true);
+    expect(after.swing[1]).toBeLessThan(before.swing[1]);
+    expect(after.feintChance).toBeGreaterThan(before.feintChance);
+  });
+
+  it("motifs sing each move's shape: the Lull waits last, the Quickening speeds up, all fit the break", () => {
+    const gaps = (id: MoveId) => {
+      const notes = motifNotes(MOVES[id], STRIKES_PER_ROUND);
+      return notes.map((n, i) => n.at - (i ? notes[i - 1].at : 0));
+    };
+    const lull = gaps("lull");
+    expect(lull[STRIKES_PER_ROUND - 1]).toBeGreaterThan(lull[0] * 2);
+    const q = gaps("quicken");
+    expect(q[0]).toBeGreaterThan(q[STRIKES_PER_ROUND - 1]);
+    const m = gaps("measured");
+    expect(new Set(m.map((g) => g.toFixed(6))).size).toBe(1);
+    // Played 1.8 s into a 2.7 s break, a motif must be done before the next strike.
+    for (const move of Object.values(MOVES)) {
+      const notes = motifNotes(move, STRIKES_PER_ROUND);
+      expect(notes[notes.length - 1].at).toBeLessThanOrEqual(0.8);
+      expect(notes.every((n) => n.semis >= 0 && n.semis <= 7)).toBe(true);
+    }
+  });
+
+  it("shapes interpolate for any strike count", () => {
+    expect(shapeAt([0.2], 0, 3)).toBe(0.2);
+    expect(shapeAt([0, 1], 1, 3)).toBeCloseTo(0.5);
+    expect(shapeAt(MOVES.lull.hold, 2, 3)).toBe(0.95);
+    expect(shapeAt([0, 1], 0, 1)).toBeCloseTo(0.5);
+  });
+
+  it("every guardian has a phase-two line, a new eye colour and a between-round beat", () => {
+    const kinds = new Set(BOSSES.map((b) => b.interlude.kind));
+    expect(kinds.size).toBe(BOSSES.length);
+    for (const b of BOSSES) {
+      expect(b.phaseTwo.line.length).toBeGreaterThan(0);
+      expect(b.phaseTwo.eye).not.toEqual(b.look.eye);
+      expect(b.phaseTwo.line).not.toMatch(/[–—]/);
+    }
+  });
+
+  it("arena.ts (between-round beats) never reads strike timing", () => {
+    const src = readFileSync(fileURLToPath(new URL("../arena.ts", import.meta.url)), "utf8");
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(code).not.toMatch(/from\s+["']\.\/(generator|engine)["']/);
+    expect(code).not.toMatch(/\b(impactAt|toImpact|holdMs|swingMs|impactOffsetMs|bladePose)\b/);
+  });
+});
+
 describe("pacing", () => {
   it("guarantees the floor by construction", () => {
     expect(PACING_FLOOR_MS).toBeGreaterThanOrEqual(TARGET_RUN_MS);
+  });
+
+  it("gives the phase shift its extra beat, and only there", () => {
+    const ends = Array.from({ length: STRIKES_PER_RUN }, (_, i) => i).filter((i) => breakAfter(i) > 0);
+    expect(ends).toHaveLength(ROUNDS_PER_RUN - 1);
+    for (const i of ends) {
+      const shift = roundOf(i) + 1 === PHASE_TWO_ROUND;
+      expect(breakAfter(i)).toBe(ROUND_BREAK_MS + (shift ? PHASE_SHIFT_MS : 0));
+    }
+    expect(breakAfter(STRIKES_PER_RUN - 1)).toBe(0);
   });
 
   it("every boss runs at least the target and not absurdly long", () => {
@@ -451,24 +659,38 @@ describe("share text", () => {
     const text = buildShareText(12, results, "https://example.com");
     const lines = text.split("\n");
     expect(lines).toHaveLength(4);
-    expect(lines[0]).toMatch(/^Deflect #12 · [SABCDF] \(\d+\)$/);
-    expect(lines[1]).toBe("🟡🟢🟡⚫🟢");
+    expect(lines[0]).toMatch(/^Dflect Everywhere #12 · [SABCDF] \(\d+\)$/);
+    expect(buildShareText(12, results, "https://example.com", "Blood Moon").split("\n")[0]).toMatch(
+      /^Dflect Everywhere #12 · [SABCDF] \(\d+\) · Blood Moon$/,
+    );
+    expect(GAME_NAME).toBe("Dflect Everywhere");
+    // One emoji per round: rounds of 3, the last one partial.
+    expect(lines[1]).toBe("🟡🟠");
     expect(lines[2]).toBe("Avg 76ms off, leaning early");
     expect(lines[3]).toBe("https://example.com");
     expect(text).not.toMatch(/[–—]/);
   });
 
-  it("wraps 30 results into rows of 10, six lines in all", () => {
+  it("compresses 30 results to one emoji per round: a single row of 10", () => {
     const offsets = [-10, -70, 20, -200, -80, 5, -45, 90, 0, -33];
     const results = Array.from({ length: 30 }, (_, i) => makeResult(offsets[i % 10]));
     const lines = buildShareText(7, results, "https://example.com").split("\n");
     expect(SHARE_ROW).toBe(10);
-    expect(lines).toHaveLength(6);
-    const rows = lines.slice(1, 4);
-    for (const row of rows) expect([...row]).toHaveLength(10);
-    // Chronological: the grid reads in play order.
-    expect(rows.join("")).toBe(results.map((r) => strikeEmoji(r.score)).join(""));
+    expect(lines).toHaveLength(4);
+    expect([...lines[1]]).toHaveLength(ROUNDS_PER_RUN);
+    // Chronological, each the round's average under the strike cut-offs.
+    expect(lines[1]).toBe(roundScores(results).map(strikeEmoji).join(""));
+    expect(roundScores(results)[0]).toBe(runScore(results.slice(0, STRIKES_PER_ROUND)));
     expect(lines.join("\n")).not.toMatch(/[–—]/);
+  });
+
+  it("marks the Deathblow at the end of the row, and only when it was played", () => {
+    const results = Array.from({ length: 30 }, () => makeResult(0));
+    const landed = buildShareText(7, results, "u", undefined, { offset: 12, landed: true }).split("\n");
+    const missed = buildShareText(7, results, "u", undefined, { offset: 140, landed: false }).split("\n");
+    expect(landed[1].endsWith(` ${DEATHBLOW_LANDED}`)).toBe(true);
+    expect(missed[1].endsWith(` ${DEATHBLOW_MISSED}`)).toBe(true);
+    expect(buildShareText(7, results, "u").split("\n")[1]).toBe("🟡".repeat(ROUNDS_PER_RUN));
   });
 });
 
@@ -620,6 +842,106 @@ function fakeStorage(initial: Record<string, string>) {
     removeItem: (k: string) => void map.delete(k),
   };
 }
+
+describe("stagger and deathblow", () => {
+  const run = (score: number, n = STRIKES_PER_RUN) =>
+    Array.from({ length: n }, () => ({ offset: 0, score }));
+
+  it("gains by tier with the fight's cut-offs", () => {
+    expect(staggerGain(100)).toBe(STAGGER_GAIN.true);
+    expect(staggerGain(80)).toBe(STAGGER_GAIN.clean);
+    expect(staggerGain(50)).toBe(STAGGER_GAIN.glancing);
+    expect(staggerGain(10)).toBe(STAGGER_GAIN.grazed);
+    expect(staggerGain(0)).toBe(STAGGER_GAIN.miss);
+  });
+
+  it("all True breaks it in round four; all Clean in round six; Glancing never does", () => {
+    expect(staggerTrack(run(100)).brokeAt).toBe(10);
+    expect(staggerTrack(run(80)).brokeAt).toBe(17);
+    expect(staggerTrack(run(50)).brokeAt).toBeNull();
+    expect(staggerTrack(run(0)).value).toBe(0);
+  });
+
+  it("the guardian catches its breath after each round, never below zero", () => {
+    let st = emptyStagger();
+    for (let i = 0; i < STRIKES_PER_ROUND; i++) st = staggerStep(st, i, 80);
+    expect(st.value).toBe(STAGGER_GAIN.clean * STRIKES_PER_ROUND - STAGGER_ROUND_RECOVERY);
+    st = staggerStep(emptyStagger(), STRIKES_PER_ROUND - 1, 0);
+    expect(st.value).toBe(0);
+  });
+
+  it("stays broken and full once broken", () => {
+    const results = [...run(100, 11), ...run(0, 19)];
+    const st = staggerTrack(results);
+    expect(st.brokeAt).toBe(10);
+    expect(st.value).toBe(STAGGER_MAX);
+    expect(staggerPeak(results)).toBe(STAGGER_MAX);
+  });
+
+  it("the incremental step and the full replay always agree (resume safety)", () => {
+    const rng = mulberry32(7);
+    for (let n = 0; n < 200; n++) {
+      const results = Array.from({ length: STRIKES_PER_RUN }, () => ({ offset: 0, score: Math.round(rng() * 100) }));
+      let st = emptyStagger();
+      results.forEach((r, i) => {
+        st = staggerStep(st, i, r.score);
+        expect(st).toEqual(staggerTrack(results.slice(0, i + 1)));
+      });
+    }
+  });
+
+  it("judges the Deathblow inside a fixed window", () => {
+    expect(judgeDeathblow(0).landed).toBe(true);
+    expect(judgeDeathblow(DEATHBLOW_WINDOW_MS).landed).toBe(true);
+    expect(judgeDeathblow(-DEATHBLOW_WINDOW_MS).landed).toBe(true);
+    expect(judgeDeathblow(DEATHBLOW_WINDOW_MS + 0.5).landed).toBe(false);
+    expect(judgeDeathblow(null)).toEqual({ offset: null, landed: false });
+  });
+
+  it("a run is not finished while a Deathblow is owed", () => {
+    const broke = run(100);
+    expect(deathblowPending(broke, null)).toBe(true);
+    expect(runFinished(broke, null)).toBe(false);
+    expect(runFinished(broke, { offset: 3, landed: true })).toBe(true);
+    expect(runFinished(run(50), null)).toBe(true);
+    expect(runFinished(run(100, 12), null)).toBe(false);
+  });
+
+  it("living kicks for stagger and deathblow stay bounded and settle", () => {
+    const out = neutralKick({ dx: 0, dy: 0, scale: 1, breathBoost: 0, eye: 1, menace: 0 });
+    for (const kind of ["stagger", "deathblow"] as const) {
+      for (let dt = 0; dt < 3000; dt += 25) {
+        kickFx(kind, dt, out);
+        expect(Math.abs(out.dx)).toBeLessThanOrEqual(0.0125);
+        expect(out.scale).toBeGreaterThan(0.97);
+        expect(out.scale).toBeLessThan(1.04);
+        expect(out.eye).toBeGreaterThanOrEqual(0);
+      }
+      kickFx(kind, 6000, out);
+      expect([Math.abs(out.dx), Math.abs(out.dy), out.scale, out.breathBoost, out.eye]).toEqual([0, 0, 1, 0, 1]);
+    }
+  });
+
+  it("stats count landed Deathblows, and old stats without the field still load", () => {
+    const st = applyRun(emptyStats(), "2026-11-14", run(100), true);
+    expect(st.deathblows).toBe(1);
+    const legacy = { ...emptyStats() } as Partial<ReturnType<typeof emptyStats>>;
+    delete legacy.deathblows;
+    expect(applyRun(legacy as ReturnType<typeof emptyStats>, "2026-11-15", run(100), true).deathblows).toBe(1);
+  });
+
+  it("a saved run that is owed its Deathblow loads as not done; an old finished record stays done", () => {
+    const owed = JSON.stringify({ date: "2026-11-14", results: run(100), attempts: [], inProgress: null, done: false });
+    const legacyDone = JSON.stringify({ date: "2026-11-13", results: run(100), attempts: [], inProgress: null, done: true });
+    const ls = fakeStorage({ "deflect:v2:daily:2026-11-14": owed, "deflect:v2:daily:2026-11-13": legacyDone });
+    vi.stubGlobal("window", { localStorage: ls });
+    const a = loadDaily("2026-11-14");
+    expect(a.done).toBe(false);
+    expect(a.deathblow).toBeNull();
+    expect(loadDaily("2026-11-13").done).toBe(true);
+    vi.unstubAllGlobals();
+  });
+});
 
 describe("storage", () => {
   afterEach(() => vi.unstubAllGlobals());

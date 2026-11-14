@@ -12,6 +12,7 @@ import {
   type ShareOutcome,
 } from "@/game/shareClient";
 import { renderShareImage } from "@/game/shareImage";
+import type { DeathblowResult } from "@/game/stagger";
 import type { StrikeResult } from "@/game/scoring";
 
 const FEEDBACK_MS = 2200;
@@ -26,10 +27,14 @@ export default function ShareActions({
   puzzle,
   bossName,
   results,
+  omen,
+  deathblow,
 }: {
   puzzle: number;
   bossName: string;
   results: StrikeResult[];
+  omen?: string;
+  deathblow?: DeathblowResult | null;
 }) {
   const [caps, setCaps] = useState<Caps | null>(null);
   const [card, setCard] = useState<File | null>(null);
@@ -49,7 +54,13 @@ export default function ShareActions({
   useEffect(() => {
     let cancelled = false;
     let url: string | null = null;
-    renderShareImage({ puzzle, bossName, results, siteLabel: window.location.host })
+    renderShareImage({
+      puzzle,
+      bossName,
+      results,
+      siteLabel: window.location.host,
+      deathblow: deathblow?.landed === true,
+    })
       .then((file) => {
         if (cancelled || !file) return;
         setCard(file);
@@ -62,7 +73,7 @@ export default function ShareActions({
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [puzzle, bossName, results]);
+  }, [puzzle, bossName, results, deathblow]);
 
   useEffect(
     () => () => {
@@ -78,7 +89,7 @@ export default function ShareActions({
     timer.current = window.setTimeout(() => setFlash(null), FEEDBACK_MS);
   };
 
-  const text = () => buildShareText(puzzle, results, siteUrl());
+  const text = () => buildShareText(puzzle, results, siteUrl(), omen, deathblow ?? null);
 
   const onShare = async () => {
     const outcome = await shareText(text());

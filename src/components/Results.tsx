@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import type { Boss } from "@/game/bosses";
 import { MISS_WINDOW_MS, PERFECT_WINDOW_MS } from "@/game/config";
-import { msUntilNextLocalDay, toDateString } from "@/game/daily";
+import { dailySeed, msUntilNextLocalDay, toDateString } from "@/game/daily";
+import { MOVES, planDay } from "@/game/moves";
 import {
   bestWorst,
   biasOf,
@@ -16,6 +17,7 @@ import {
   type StrikeResult,
 } from "@/game/scoring";
 import { scoreColor } from "@/game/shareImage";
+import { staggerPeak, type DeathblowResult } from "@/game/stagger";
 import ShareActions from "./ShareActions";
 import { Footer, Logo } from "./ui";
 
@@ -26,6 +28,7 @@ export interface ResultsProps {
   /** The date this run belongs to (daily only). */
   date: string;
   results: StrikeResult[];
+  deathblow: DeathblowResult | null;
   hasDailyResult: boolean;
   onPractice: () => void;
   onShowDaily: () => void;
@@ -157,6 +160,9 @@ export default function Results(props: ResultsProps) {
   const grade = gradeFor(score);
   const bias = biasOf(results);
   const extremes = bestWorst(results);
+  const day = mode === "daily" ? planDay(dailySeed(date), boss) : null;
+  const blow = props.deathblow;
+  const blowMs = blow?.offset === null || blow?.offset === undefined ? null : Math.round(Math.abs(blow.offset));
 
   return (
     <main className="relative z-[1] mx-auto flex min-h-dvh w-full max-w-[32rem] flex-col px-5 pt-[max(env(safe-area-inset-top),1.25rem)]">
@@ -165,6 +171,11 @@ export default function Results(props: ResultsProps) {
         <p className="font-display text-base tracking-[0.2em] text-ash uppercase">
           {mode === "daily" ? `No. ${puzzle}` : "Practice"} · {boss.name}
         </p>
+        {day && (
+          <p className="-mt-3 text-lg text-ash italic">
+            {day.omen.name}, favouring {MOVES[day.signature].name}
+          </p>
+        )}
 
         <section aria-label="Grade" className="flex flex-col items-center">
           <p className="logo text-[6rem] leading-none font-black" style={{ letterSpacing: 0, marginRight: 0 }}>
@@ -175,6 +186,13 @@ export default function Results(props: ResultsProps) {
           </h2>
           <p className="mt-1 text-xl text-bone">
             Score <span className="tabular-nums">{score}</span> of 100
+          </p>
+          <p className={`mt-2 text-xl ${blow?.landed ? "text-gold-bright" : blow ? "text-blood" : "text-ash"}`}>
+            {blow?.landed
+              ? `⚔ Deathblow landed${blowMs === null ? "" : `, ${blowMs === 0 ? "dead on" : `${blowMs} ms ${(blow.offset ?? 0) < 0 ? "early" : "late"}`}`}`
+              : blow
+                ? `Staggered it, but the Deathblow ${blowMs === null ? "never came" : "missed"}`
+                : `Never staggered (meter peaked at ${staggerPeak(results)})`}
           </p>
         </section>
 
@@ -200,7 +218,13 @@ export default function Results(props: ResultsProps) {
         </section>
 
         <div className="flex flex-col items-center gap-3">
-          {mode === "daily" && <ShareActions puzzle={puzzle} bossName={boss.name} results={results} />}
+          {mode === "daily" && <ShareActions
+              puzzle={puzzle}
+              bossName={boss.name}
+              results={results}
+              omen={day?.omen.name}
+              deathblow={blow}
+            />}
           <div className="flex flex-wrap justify-center gap-3">
             <button type="button" className={mode === "practice" ? "btn btn-primary" : "btn"} onClick={props.onPractice}>
               {mode === "practice" ? "Practice again" : "Practice"}

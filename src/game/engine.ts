@@ -5,18 +5,29 @@ import {
   ANGLE_REST_DEG,
   GAP_MS,
   INTRO_MS,
+  isPhaseShift,
   isRoundEnd,
   MIN_CYCLE_MS,
   MISS_WINDOW_MS,
   OUTRO_MS,
   RAISE_MS,
-  ROUND_BREAK_MS,
   roundOf,
   STRIKES_PER_RUN,
 } from "./config";
 import { bladePose, generateEncounter, impactOffsetMs, type Strike } from "./generator";
+import { MOVES, planDay, type DayPlan } from "./moves";
+import { breakAfter } from "./pacing";
 import { computeLayout, Scene, type Layout } from "./scene";
 import { makeResult, type StrikeResult } from "./scoring";
+import {
+  DEATHBLOW_DEAF_MS,
+  DEATHBLOW_LATE_MS,
+  DEATHBLOW_LEAD_MS,
+  judgeDeathblow,
+  staggerStep,
+  type DeathblowResult,
+  type StaggerState,
+} from "./stagger";
 
 export interface EngineOptions {
   canvas: HTMLCanvasElement;
@@ -27,6 +38,10 @@ export interface EngineOptions {
   attempts: number[];
   /** Consecutive True deflects already banked before this engine started. */
   priorTrueStreak?: number;
+  /** Stagger meter rebuilt from the results already banked (see stagger.ts). */
+  stagger: StaggerState;
+  /** The Deathblow, if this run already played it. */
+  deathblow: DeathblowResult | null;
   reducedMotion: boolean;
   audio: GameAudio;
   onStrikeStart: (index: number) => void;
@@ -35,6 +50,11 @@ export interface EngineOptions {
   onRoundEnd?: (round: number) => void;
   /** A strike was voided (tab hidden, or the player paused). `attempts` is the updated counter list. */
   onVoid: (index: number, attempts: number[]) => void;
+  /** The meter moved. `broke` is true on the result that filled it. */
+  onStagger?: (state: StaggerState) => void;
+  /** The guardian staggered and the Deathblow beats began. */
+  onDeathblowStart?: () => void;
+  onDeathblow?: (result: DeathblowResult) => void;
   onComplete: () => void;
 }
 
@@ -52,7 +72,7 @@ export interface DebugInfo {
   lastOffset: number | null;
 }
 
-type Mode = "intro" | "gap" | "strike" | "outro" | "done";
+type Mode = "intro" | "gap" | "strike" | "deathblow" | "outro" | "done";
 export type HoldReason = "ui" | "hidden";
 
 interface Seg {
@@ -93,6 +113,7 @@ function animAngle(a: Anim, now: number): number {
 export class Engine {
   private ctx: CanvasRenderingContext2D;
   private scene: Scene;
+  private day: DayPlan;
   private layout: Layout = computeLayout(1, 2);
   private dpr = 1;
   private raf = 0;
@@ -105,6 +126,12 @@ export class Engine {
   private attempts: number[];
   private holds = new Set<HoldReason>();
   private trueStreak: number;
+  private stagger: StaggerState;
+  /** The meter broke and the Deathblow is owed. */
+  private owed: boolean;
+  private dbT0 = 0;
+  private dbMark = 0;
+  private dbTapped: number | null = null;
 
   private strike: Strike | null = null;
   private t0 = 0;
@@ -127,10 +154,15 @@ export class Engine {
     const ctx = o.canvas.getContext("2d");
     if (!ctx) throw new Error("Canvas 2D is not available");
     this.ctx = ctx;
-    this.scene = new Scene(o.boss, o.reducedMotion, o.seed);
+    this.day = planDay(o.seed, o.boss);
+    this.scene = new Scene(o.boss, o.reducedMotion, o.seed, this.day.omen);
     this.index = o.startIndex;
+    // Resuming a saved run: the arena already carries the marks of the rounds behind it.
+    this.scene.restore(roundOf(o.startIndex));
     this.attempts = [...o.attempts];
     this.trueStreak = o.priorTrueStreak ?? 0;
+    this.stagger = o.stagger;
+    this.owed = o.stagger.brokeAt !== null && !o.deathblow;
     this.resize();
   }
 
@@ -139,6 +171,10 @@ export class Engine {
     this.startedAt = now;
     this.nextAt = now + INTRO_MS;
     this.mode = "intro";
+    // The first round's motif, near the end of the reveal.
+    if (this.index < STRIKES_PER_RUN) {
+      this.o.audio.motif(MOVES[this.day.moves[roundOf(this.index)]], this.o.boss.interlude.kind, INTRO_MS / 1000 - 1.25);
+    }
     document.addEventListener("visibilitychange", this.onVisibility);
     this.raf = requestAnimationFrame(this.frame);
   }
@@ -190,6 +226,12 @@ export class Engine {
       this.scene.kick("release", now);
       this.o.onVoid(this.index, [...this.attempts]);
     }
+    if (this.mode === "deathblow" && this.dbTapped === null) {
+      // The Deathblow is a fixed rhythm with nothing to reroll: it simply starts again.
+      this.mode = "gap";
+      this.scene.deathblowCancel();
+      this.scene.kick("release", now);
+    }
     this.nextAt = Number.POSITIVE_INFINITY;
   }
 
@@ -210,10 +252,20 @@ export class Engine {
    * keydown), which shares a clock with performance.now().
    */
   tap(timeStamp: number): void {
-    if (this.paused || this.mode !== "strike" || !this.strike || this.locked) return;
+    if (this.paused) return;
     const now = performance.now();
     // Guard against browsers that report a different time origin.
     const t = Math.abs(timeStamp - now) < 2000 ? timeStamp : now;
+    if (this.mode === "deathblow") {
+      if (this.dbTapped !== null || t - this.dbT0 < DEATHBLOW_DEAF_MS) return;
+      if (t - this.dbMark > DEATHBLOW_LATE_MS) return;
+      this.dbTapped = t;
+      this.scene.tapAck(now, this.layout);
+      // Resolve on the mark (or now, if the tap was late), like a strike.
+      if (t >= this.dbMark) this.resolveDeathblow(now);
+      return;
+    }
+    if (this.mode !== "strike" || !this.strike || this.locked) return;
     const offset = t - this.impactAt;
     // Past the window the strike is already a miss; the frame loop records it.
     if (offset > MISS_WINDOW_MS) return;
@@ -240,6 +292,7 @@ export class Engine {
     const s = this.strike;
     let phase: string = this.mode;
     if (this.mode === "strike" && s) phase = bladePose(s, now - this.t0).phase;
+    if (this.mode === "deathblow") phase = `deathblow (mark in ${Math.round(this.dbMark - now)} ms)`;
     if (this.paused) phase = `${phase} (held)`;
     return {
       phase,
@@ -257,7 +310,7 @@ export class Engine {
   }
 
   private beginStrike(now: number): void {
-    const strikes = generateEncounter(this.o.seed, this.o.boss, this.attempts);
+    const strikes = generateEncounter(this.o.seed, this.o.boss, this.attempts, this.day);
     this.strike = strikes[this.index];
     this.t0 = now;
     // The answer is fixed here, before anything moves. A stall is already in it.
@@ -344,24 +397,82 @@ export class Engine {
       }
     }
 
-    // Next strike: never sooner than the cycle floor, plus a beat between rounds.
-    // This is what guarantees the run length (see pacing.ts).
+    // Stagger: fold this result into the meter (the same pure step a resume replays).
+    const before = this.stagger;
+    this.stagger = staggerStep(before, this.index, score);
+    if (this.stagger !== before) this.o.onStagger?.(this.stagger);
+    if (before.brokeAt === null && this.stagger.brokeAt !== null) this.owed = true;
+
+    // Next strike: never sooner than the cycle floor, plus a beat between rounds
+    // (longer before phase two). This is what guarantees the run length (see pacing.ts).
     const floorAt = this.t0 + MIN_CYCLE_MS;
-    const extra = isRoundEnd(this.index) && this.index < STRIKES_PER_RUN - 1 ? ROUND_BREAK_MS : 0;
-    this.nextAt = Math.max(now + GAP_MS, floorAt) + extra;
-    if (isRoundEnd(this.index)) this.o.onRoundEnd?.(roundOf(this.index));
+    this.nextAt = Math.max(now + GAP_MS, floorAt) + breakAfter(this.index);
+    if (isRoundEnd(this.index)) {
+      const round = roundOf(this.index);
+      // The between-round beat. It runs inside the break and is fixed before the
+      // next strike exists, so it can say nothing about that strike's timing.
+      if (this.index < STRIKES_PER_RUN - 1) {
+        const shift = isPhaseShift(round + 1);
+        this.scene.interlude(round, now, shift);
+        this.o.audio.interlude(this.o.boss.interlude.kind, shift);
+        // The next round's motif, after the beat (and after the turn, before phase two).
+        this.o.audio.motif(MOVES[this.day.moves[round + 1]], this.o.boss.interlude.kind, shift ? 3.75 : 1.8);
+      }
+      this.o.onRoundEnd?.(round);
+    }
 
     this.strike = null;
     this.stalled = false;
     this.index += 1;
-    if (this.index >= STRIKES_PER_RUN) {
+    if (this.index >= STRIKES_PER_RUN && !this.owed) {
       this.mode = "outro";
       this.nextAt = now + OUTRO_MS;
     } else {
+      // A Deathblow owed after the final strike still gets its turn before the outro.
       this.mode = "gap";
     }
     // Resolved while the fight is held (a tapped strike that was already locked):
     // wait for the player to come back.
+    if (this.paused) this.nextAt = Number.POSITIVE_INFINITY;
+  }
+
+  /** The guardian staggers: heartbeat beats count down to the mark. */
+  private beginDeathblow(now: number): void {
+    this.mode = "deathblow";
+    this.dbT0 = now;
+    this.dbMark = now + DEATHBLOW_LEAD_MS;
+    this.dbTapped = null;
+    this.anim = { from: this.angle, start: now, segs: [{ to: REST + rad(10), dur: 420, ease: easeOutCubic }] };
+    this.scene.deathblowStart(now);
+    this.scene.kick("stagger", now);
+    this.o.audio.heartbeats(DEATHBLOW_LEAD_MS / 1000);
+    this.o.onDeathblowStart?.();
+  }
+
+  private resolveDeathblow(now: number): void {
+    if (this.mode !== "deathblow") return;
+    const result = judgeDeathblow(this.dbTapped === null ? null : this.dbTapped - this.dbMark);
+    this.owed = false;
+    if (result.landed) {
+      this.scene.deathblowLanded(now, this.layout);
+      this.scene.kick("deathblow", now);
+      this.o.audio.deathblow(true);
+      this.vibrate([30, 40, 80]);
+    } else {
+      this.scene.deathblowFailed(now, this.layout);
+      this.scene.kick("late", now);
+      this.o.audio.deathblow(false);
+    }
+    this.anim = { from: this.angle, start: now, segs: [{ to: REST, dur: 500, ease: easeOutCubic }] };
+    this.o.onDeathblow?.(result);
+    if (this.index >= STRIKES_PER_RUN) {
+      this.mode = "outro";
+      this.nextAt = now + OUTRO_MS + 600;
+    } else {
+      this.mode = "gap";
+      // A longer beat after the climax, then the fight goes on.
+      this.nextAt = now + GAP_MS + 900;
+    }
     if (this.paused) this.nextAt = Number.POSITIVE_INFINITY;
   }
 
@@ -402,7 +513,12 @@ export class Engine {
     const now = Math.max(frameTime, performance.now());
 
     if ((this.mode === "intro" || this.mode === "gap") && now >= this.nextAt) {
-      this.beginStrike(now);
+      if (this.owed) this.beginDeathblow(now);
+      else if (this.index < STRIKES_PER_RUN) this.beginStrike(now);
+      else {
+        this.mode = "outro";
+        this.nextAt = now + OUTRO_MS;
+      }
     } else if (this.mode === "outro" && now >= this.nextAt) {
       this.mode = "done";
       this.o.onComplete();
@@ -445,6 +561,11 @@ export class Engine {
       }
     }
 
+    if (this.mode === "deathblow") {
+      if (this.dbTapped !== null && now >= this.dbMark) this.resolveDeathblow(now);
+      else if (now >= this.dbMark + DEATHBLOW_LATE_MS) this.resolveDeathblow(now);
+    }
+
     this.angle = this.currentAngle(now);
 
     // Motion trail: where the blade was ~70ms ago, only while it is moving down.
@@ -461,6 +582,7 @@ export class Engine {
       presence: Math.min(1, (now - this.startedAt) / (INTRO_MS * 0.8)),
       menace: inStrike ? 1 : 0.3,
       stalled: this.stalled && inStrike,
+      deathblow: this.mode === "deathblow" ? { t0: this.dbT0, mark: this.dbMark } : null,
       pixelRatio: this.dpr,
     });
 

@@ -1,12 +1,16 @@
 import type { Boss } from "./bosses";
 import {
   GAP_MS,
+  HAS_PHASE_TWO,
   INTRO_MS,
+  isPhaseShift,
   isRoundEnd,
   MIN_CYCLE_MS,
   OUTRO_MS,
+  PHASE_SHIFT_MS,
   RAISE_MS,
   ROUND_BREAK_MS,
+  roundOf,
   ROUNDS_PER_RUN,
   STRIKES_PER_RUN,
 } from "./config";
@@ -22,8 +26,15 @@ export const PACING_FLOOR_MS =
   INTRO_MS +
   (STRIKES_PER_RUN - 1) * MIN_CYCLE_MS +
   (ROUNDS_PER_RUN - 1) * ROUND_BREAK_MS +
+  (HAS_PHASE_TWO ? PHASE_SHIFT_MS : 0) +
   RAISE_MS +
   OUTRO_MS;
+
+/** Extra wait after strike i before the next one: round break, phase shift. */
+export function breakAfter(i: number): number {
+  if (!isRoundEnd(i) || i >= STRIKES_PER_RUN - 1) return 0;
+  return ROUND_BREAK_MS + (isPhaseShift(roundOf(i) + 1) ? PHASE_SHIFT_MS : 0);
+}
 
 /**
  * Wall-clock length of a run in which every tap lands exactly on impact. It
@@ -41,7 +52,7 @@ export function simulateRunMs(seed: string, boss: Boss): number {
       return;
     }
     t += Math.max(impactOffsetMs(s) + GAP_MS, MIN_CYCLE_MS);
-    if (isRoundEnd(i)) t += ROUND_BREAK_MS;
+    t += breakAfter(i);
   });
   return t;
 }

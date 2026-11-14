@@ -1,4 +1,4 @@
-import { ROUNDS_PER_RUN, STRIKES_PER_ROUND } from "./config";
+import { GAME_NAME, ROUNDS_PER_RUN, STRIKES_PER_ROUND } from "./config";
 
 /**
  * Player-facing copy that quotes the run structure. Everything derives from
@@ -30,7 +30,7 @@ export const howToStrikes = (): string =>
 /** Metadata and Open Graph description. */
 export const pitch = (): string =>
   `One foe. ${capitalize(numberWord(ROUNDS_PER_RUN))} ${rounds()}. Tap at the instant of impact. ` +
-  `A daily parry-timing duel scored to the millisecond.`;
+  `A daily parry-timing duel scored to the millisecond, and no two days fight alike.`;
 
 /** Open Graph banner line. */
 export const bannerLine = (): string =>
@@ -38,4 +38,4 @@ export const bannerLine = (): string =>
 
 /** Open Graph alt text. */
 export const ogAlt = (): string =>
-  `Deflect: the daily parry. One foe, ${numberWord(ROUNDS_PER_RUN)} ${rounds()}, one tap per strike.`;
+  `${GAME_NAME}: the daily parry. One foe, ${numberWord(ROUNDS_PER_RUN)} ${rounds()}, one tap per strike.`;

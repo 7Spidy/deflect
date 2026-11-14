@@ -38,6 +38,7 @@ export default function StatsModal({
     ["Played", String(stats.played)],
     ["Streak", String(liveStreak(stats, today))],
     ["Best streak", String(stats.bestStreak)],
+    ["Deathblows", String(stats.deathblows ?? 0)],
   ];
 
   return (
@@ -56,7 +57,7 @@ export default function StatsModal({
           Records
         </h2>
 
-        <dl className="mt-5 grid grid-cols-3 gap-2 text-center">
+        <dl className="mt-5 grid grid-cols-2 gap-x-2 gap-y-4 text-center sm:grid-cols-4">
           {figures.map(([label, value]) => (
             <div key={label} className="flex flex-col-reverse">
               <dt className="text-base text-ash">{label}</dt>

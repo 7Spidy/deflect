@@ -42,3 +42,5 @@ next-env.d.ts
 
 # guardian source art (never ships)
 /art-src/
+
+.vercel

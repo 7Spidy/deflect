@@ -1,6 +1,6 @@
 "use client";
 
-import { AUTHOR_NAME, AUTHOR_URL } from "@/game/config";
+import { AUTHOR_NAME, AUTHOR_URL, GAME_NAME, GAME_NAME_PARTS } from "@/game/config";
 
 export function MuteToggle({
   muted,
@@ -51,8 +51,16 @@ export function Footer() {
 export function Logo({ small = false }: { small?: boolean }) {
   return (
     <div className="flex flex-col items-center">
-      <h1 className={`logo ${small ? "text-4xl" : "text-[clamp(2.75rem,13vw,4.5rem)]"} leading-none`}>
-        DEFLECT
+      <h1 aria-label={GAME_NAME} className="flex flex-col items-center leading-none">
+        <span className={`logo ${small ? "text-4xl" : "text-[clamp(2.75rem,13vw,4.5rem)]"}`}>
+          {GAME_NAME_PARTS[0].toUpperCase()}
+        </span>
+        <span
+          className={`logo mt-2 font-semibold ${small ? "text-base" : "text-[clamp(1.1rem,5vw,1.6rem)]"}`}
+          style={{ letterSpacing: "0.52em", marginRight: "-0.52em" }}
+        >
+          {GAME_NAME_PARTS[1].toUpperCase()}
+        </span>
       </h1>
       <div className={`guard-rule mt-3 ${small ? "w-48" : "w-[min(78vw,22rem)]"}`} />
     </div>

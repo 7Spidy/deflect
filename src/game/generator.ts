@@ -6,6 +6,7 @@ import {
   FEINT_MIN_HOLD_MS,
   FEINT_TAIL_MS,
   RAISE_MS,
+  roundOf,
   ROUNDS_PER_RUN,
   STALL_AT_FRACTION,
   STALL_DURATION_MS,
@@ -13,6 +14,7 @@ import {
   STRIKES_PER_RUN,
   WARMUP_ROUNDS,
 } from "./config";
+import { MOVES, planDay, roundRanges, shapeAt, spread, tellSlot, type DayPlan } from "./moves";
 import { seededRng } from "./prng";
 
 export interface Feint {
@@ -47,35 +49,42 @@ const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
  * the first few strikes). Depends on (seed, boss) only, never on attempts.
  * Accepted minor leak: a voided strike keeps its deception kind but gets new
  * timing. At most one deceptive strike per round (MAX_DECEPTIVE_PER_ROUND),
- * none in warm-up rounds.
+ * none in warm-up rounds. Odds come from roundRanges (omen and phase), and a
+ * move with a tell puts its deception in the same slot every time, so a Lull
+ * always hangs on its last blow.
  */
-export function planDeception(seed: string, boss: Boss): Deception[] {
+export function planDeception(seed: string, boss: Boss, day: DayPlan = planDay(seed, boss)): Deception[] {
   const plan: Deception[] = new Array<Deception>(STRIKES_PER_RUN).fill(null);
   for (let r = WARMUP_ROUNDS; r < ROUNDS_PER_RUN; r++) {
     const rng = seededRng(`${seed}|${boss.id}|plan|${r}`);
-    const feintHit = rng() < boss.feintRoundChance;
-    const stallHit = rng() < boss.stallRoundChance;
+    const ranges = roundRanges(boss, day, r);
+    const move = MOVES[day.moves[r]];
+    const feintHit = rng() < ranges.feintChance;
+    const stallHit = rng() < ranges.stallChance;
     const slotRoll = rng();
     const kindRoll = rng();
     let kind: Deception = null;
-    if (feintHit && stallHit) kind = kindRoll < 0.5 ? "feint" : "stall";
-    else if (feintHit) kind = "feint";
+    if (feintHit && stallHit) {
+      kind = move.tell ? move.tell.prefer : kindRoll < 0.5 ? "feint" : "stall";
+    } else if (feintHit) kind = "feint";
     else if (stallHit) kind = "stall";
     // A feint needs room inside the hold; otherwise it becomes a stall (or nothing).
-    if (kind === "feint" && boss.holdMs[1] < FEINT_MIN_HOLD_MS) {
+    if (kind === "feint" && ranges.hold[1] < FEINT_MIN_HOLD_MS) {
       kind = stallHit ? "stall" : null;
     }
     if (kind) {
-      plan[r * STRIKES_PER_ROUND + Math.floor(slotRoll * STRIKES_PER_ROUND)] = kind;
+      const slot = tellSlot(move, STRIKES_PER_ROUND) ?? Math.floor(slotRoll * STRIKES_PER_ROUND);
+      plan[r * STRIKES_PER_ROUND + slot] = kind;
     }
   }
   return plan;
 }
 
 /**
- * One strike, derived only from (seed, boss, index, attempt, kind). Bumping
- * the attempt counter re-derives a completely different timing, which is how
- * a voided strike is replayed without giving the player foreknowledge.
+ * One strike, derived only from (seed, boss, index, attempt, kind) and the
+ * day plan (itself a function of seed and boss). Bumping the attempt counter
+ * re-derives a different timing inside the same move shape, which is how a
+ * voided strike is replayed without giving the player foreknowledge.
  */
 export function generateStrike(
   seed: string,
@@ -83,6 +92,7 @@ export function generateStrike(
   index: number,
   attempt: number,
   kind: Deception,
+  day: DayPlan = planDay(seed, boss),
 ): Strike {
   const rng = seededRng(`${seed}|${boss.id}|${index}|${attempt}`);
   // The first roll used to decide feints; the plan does that now. It is still
@@ -94,15 +104,22 @@ export function generateStrike(
   const atRoll = rng();
   const durRoll = rng();
 
-  const [holdMin, holdMax] = boss.holdMs;
-  const [swingMin, swingMax] = boss.swingMs;
+  const round = roundOf(index);
+  const k = index - round * STRIKES_PER_ROUND;
+  const ranges = roundRanges(boss, day, round);
+  const move = MOVES[day.moves[round]];
+  const jitter = move.jitter * day.omen.jitterScale;
+  const [holdMin, holdMax] = ranges.hold;
+  const [swingMin, swingMax] = ranges.swing;
 
   const hasFeint = kind === "feint" && holdMax >= FEINT_MIN_HOLD_MS;
-  // A feint needs room inside the hold, so feint strikes draw from the upper
-  // part of the boss's hold range. Still always within [holdMin, holdMax].
+  // A feint needs room inside the hold, so feint strikes map the move's shape
+  // onto the upper part of the hold range. Still always within [holdMin, holdMax].
   const lo = hasFeint ? Math.max(holdMin, FEINT_MIN_HOLD_MS) : holdMin;
-  const holdMs = Math.round(lerp(lo, holdMax, holdRoll));
-  const swingMs = Math.round(lerp(swingMin, swingMax, swingRoll));
+  const holdU = spread(shapeAt(move.hold, k, STRIKES_PER_ROUND), jitter, holdRoll);
+  const swingU = spread(shapeAt(move.swing, k, STRIKES_PER_ROUND), jitter, swingRoll);
+  const holdMs = Math.round(lerp(lo, holdMax, holdU));
+  const swingMs = Math.round(lerp(swingMin, swingMax, swingU));
 
   const feint: Feint | null = hasFeint
     ? {
@@ -136,11 +153,12 @@ export function generateEncounter(
   seed: string,
   boss: Boss,
   attempts: readonly number[] = [],
+  day: DayPlan = planDay(seed, boss),
 ): Strike[] {
-  const plan = planDeception(seed, boss);
+  const plan = planDeception(seed, boss, day);
   const strikes: Strike[] = [];
   for (let i = 0; i < STRIKES_PER_RUN; i++) {
-    strikes.push(generateStrike(seed, boss, i, attempts[i] ?? 0, plan[i]));
+    strikes.push(generateStrike(seed, boss, i, attempts[i] ?? 0, plan[i], day));
   }
   return strikes;
 }

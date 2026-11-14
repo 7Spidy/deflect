@@ -1,5 +1,6 @@
 import { STRIKES_PER_RUN } from "./config";
 import type { StrikeResult } from "./scoring";
+import { runFinished, type DeathblowResult } from "./stagger";
 import { emptyStats, type Stats } from "./stats";
 
 const PREFIX = "deflect:v1:";
@@ -20,6 +21,9 @@ export interface DailyRecord {
   attempts: number[];
   /** Strike that had begun but not resolved when we last saved. */
   inProgress: number | null;
+  /** The Deathblow, once played (absent in records from before stagger existed). */
+  deathblow?: DeathblowResult | null;
+  /** Every strike resolved and no Deathblow is owed (see stagger.ts runFinished). */
   done: boolean;
 }
 
@@ -46,6 +50,7 @@ export function emptyDaily(date: string): DailyRecord {
     results: [],
     attempts: new Array<number>(STRIKES_PER_RUN).fill(0),
     inProgress: null,
+    deathblow: null,
     done: false,
   };
 }
@@ -67,12 +72,15 @@ export function loadDaily(date: string): DailyRecord {
     attempts[inProgress] += 1;
   }
   inProgress = null;
+  const deathblow = rec.deathblow ?? null;
   const fixed: DailyRecord = {
     date,
     results,
     attempts,
     inProgress,
-    done: results.length >= STRIKES_PER_RUN,
+    deathblow,
+    // A record finished before stagger existed keeps its finished state.
+    done: rec.done === true && results.length >= STRIKES_PER_RUN ? true : runFinished(results, deathblow),
   };
   write(DAILY_PREFIX + date, fixed);
   return fixed;
