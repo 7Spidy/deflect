@@ -4,9 +4,9 @@ import type { StrikeResult } from "./scoring";
 /**
  * Stagger (posture, as in Sekiro). Good deflects fill the guardian's stagger
  * meter; misses and the breath it catches between rounds drain it. Fill it and
- * the guardian staggers: one Deathblow, a single fixed-rhythm tap, the same for
- * everyone. One Deathblow per run at most. It never changes the run score; it
- * is the run's climax and its own mark on the share.
+ * the guardian staggers: one Deathblow, a single fixed-rhythm tap (with one slip
+ * forgiven), the same for everyone. One Deathblow per run at most. It never
+ * changes the run score; it is the run's climax and its own mark on the share.
  *
  * Pure: the meter is a function of the results, so a resumed run rebuilds it
  * exactly, and the engine and the UI can never disagree.
@@ -22,19 +22,32 @@ export const STAGGER_ROUND_RECOVERY = 8;
  * Deathblow rhythm. DEATHBLOW_BEATS heartbeat pulses, DEATHBLOW_BEAT_MS apart;
  * the last one is the mark. Taps in the first DEATHBLOW_DEAF_MS are ignored
  * (a late tap meant for the strike before must not spend the Deathblow).
+ *
+ * One slip is forgiven (DEATHBLOW_SLIPS): a first tap outside the window, or no
+ * tap by mark + DEATHBLOW_WINDOW_MS, schedules a retry mark one beat later with
+ * one extra heartbeat. The second attempt gets the same window and decides.
  */
-export const DEATHBLOW_BEATS = 4;
-export const DEATHBLOW_BEAT_MS = 420;
+export const DEATHBLOW_BEATS = 3;
+export const DEATHBLOW_BEAT_MS = 500;
 export const DEATHBLOW_LEAD_MS = DEATHBLOW_BEATS * DEATHBLOW_BEAT_MS;
-export const DEATHBLOW_WINDOW_MS = 60;
+export const DEATHBLOW_WINDOW_MS = 90;
 export const DEATHBLOW_DEAF_MS = 450;
 /** No tap by mark + this: the guardian recovers. */
 export const DEATHBLOW_LATE_MS = MISS_WINDOW_MS;
+/** Slips forgiven per Deathblow: the first miss is a retry, the second fails. The engine plays exactly one retry. */
+export const DEATHBLOW_SLIPS = 1;
+/**
+ * After a slip, taps this soon after the first mark are stragglers meant for it
+ * and are ignored, so they cannot spend the retry. Measured from the first mark.
+ */
+export const DEATHBLOW_RETRY_DEAF_MS = DEATHBLOW_LATE_MS;
 
 export interface DeathblowResult {
-  /** tap - mark in ms (negative = early), or null for no tap. */
+  /** tap - mark in ms (negative = early) of the deciding tap, or null for no tap. */
   offset: number | null;
   landed: boolean;
+  /** Landed or failed after using the one slip. Absent in older saved runs. */
+  slipped?: boolean;
 }
 
 export function staggerGain(score: number): number {
@@ -84,10 +97,17 @@ export function staggerPeak(results: readonly StrikeResult[]): number {
   return peak;
 }
 
-export function judgeDeathblow(offset: number | null): DeathblowResult {
-  if (offset === null || !Number.isFinite(offset)) return { offset: null, landed: false };
+/** `slipped`: this tap was the retry, after the first attempt missed. */
+export function judgeDeathblow(offset: number | null, slipped = false): DeathblowResult {
+  const tail = slipped ? { slipped: true } : {};
+  if (offset === null || !Number.isFinite(offset)) return { offset: null, landed: false, ...tail };
   const rounded = Math.round(offset * 10) / 10;
-  return { offset: rounded, landed: Math.abs(offset) <= DEATHBLOW_WINDOW_MS };
+  return { offset: rounded, landed: Math.abs(offset) <= DEATHBLOW_WINDOW_MS, ...tail };
+}
+
+/** The retry mark: exactly one beat after the mark that was missed. */
+export function deathblowRetryMark(mark: number): number {
+  return mark + DEATHBLOW_BEAT_MS;
 }
 
 /** The Deathblow is owed: the meter broke and it has not been played yet. */

@@ -95,8 +95,16 @@ import {
   type ShareEnv,
 } from "../shareClient";
 import {
+  DEATHBLOW_BEAT_MS,
+  DEATHBLOW_BEATS,
+  DEATHBLOW_DEAF_MS,
+  DEATHBLOW_LATE_MS,
+  DEATHBLOW_LEAD_MS,
+  DEATHBLOW_RETRY_DEAF_MS,
+  DEATHBLOW_SLIPS,
   DEATHBLOW_WINDOW_MS,
   deathblowPending,
+  deathblowRetryMark,
   judgeDeathblow,
   runFinished,
   STAGGER_GAIN,
@@ -891,11 +899,53 @@ describe("stagger and deathblow", () => {
   });
 
   it("judges the Deathblow inside a fixed window", () => {
+    expect(DEATHBLOW_WINDOW_MS).toBe(90);
     expect(judgeDeathblow(0).landed).toBe(true);
     expect(judgeDeathblow(DEATHBLOW_WINDOW_MS).landed).toBe(true);
     expect(judgeDeathblow(-DEATHBLOW_WINDOW_MS).landed).toBe(true);
+    expect(judgeDeathblow(90).landed).toBe(true);
+    expect(judgeDeathblow(-90).landed).toBe(true);
     expect(judgeDeathblow(DEATHBLOW_WINDOW_MS + 0.5).landed).toBe(false);
+    expect(judgeDeathblow(-DEATHBLOW_WINDOW_MS - 0.5).landed).toBe(false);
     expect(judgeDeathblow(null)).toEqual({ offset: null, landed: false });
+  });
+
+  it("the Deathblow is slower, shorter and one slip forgiving", () => {
+    expect(DEATHBLOW_BEATS).toBeGreaterThanOrEqual(2);
+    expect(DEATHBLOW_LEAD_MS).toBe(DEATHBLOW_BEATS * DEATHBLOW_BEAT_MS);
+    expect(DEATHBLOW_SLIPS).toBe(1);
+  });
+
+  it("the deaf periods can never swallow a valid tap", () => {
+    // First attempt: the earliest valid tap is mark - window.
+    expect(DEATHBLOW_DEAF_MS).toBeLessThanOrEqual(DEATHBLOW_LEAD_MS - DEATHBLOW_WINDOW_MS);
+    // Retry: stragglers for the first mark end before the retry window opens.
+    expect(DEATHBLOW_RETRY_DEAF_MS).toBeLessThanOrEqual(DEATHBLOW_BEAT_MS - DEATHBLOW_WINDOW_MS);
+    // ... and still cover the first mark's whole late range, so a late tap cannot spend the retry.
+    expect(DEATHBLOW_RETRY_DEAF_MS).toBeGreaterThanOrEqual(DEATHBLOW_WINDOW_MS);
+    expect(DEATHBLOW_LATE_MS).toBeGreaterThan(DEATHBLOW_WINDOW_MS);
+  });
+
+  it("one slip: a first hit lands clean, a miss then a hit lands slipped, two misses fail", () => {
+    const first = judgeDeathblow(40);
+    expect(first.landed).toBe(true);
+    expect(first.slipped).toBeFalsy();
+    const retried = judgeDeathblow(-30, true);
+    expect(retried).toEqual({ offset: -30, landed: true, slipped: true });
+    expect(judgeDeathblow(DEATHBLOW_WINDOW_MS + 1, true)).toEqual({
+      offset: DEATHBLOW_WINDOW_MS + 1,
+      landed: false,
+      slipped: true,
+    });
+    expect(judgeDeathblow(null, true)).toEqual({ offset: null, landed: false, slipped: true });
+  });
+
+  it("the retry mark is exactly one beat after the first, with the same window", () => {
+    const mark = 12345;
+    expect(deathblowRetryMark(mark) - mark).toBe(DEATHBLOW_BEAT_MS);
+    // A tap judged against the retry mark gets the same +/- window.
+    expect(judgeDeathblow(DEATHBLOW_WINDOW_MS, true).landed).toBe(true);
+    expect(judgeDeathblow(-DEATHBLOW_WINDOW_MS, true).landed).toBe(true);
   });
 
   it("a run is not finished while a Deathblow is owed", () => {
@@ -928,6 +978,24 @@ describe("stagger and deathblow", () => {
     const legacy = { ...emptyStats() } as Partial<ReturnType<typeof emptyStats>>;
     delete legacy.deathblows;
     expect(applyRun(legacy as ReturnType<typeof emptyStats>, "2026-11-15", run(100), true).deathblows).toBe(1);
+  });
+
+  it("an old saved Deathblow without `slipped` still loads and counts", () => {
+    const old = JSON.stringify({
+      date: "2026-11-14",
+      results: run(100),
+      attempts: [],
+      inProgress: null,
+      done: true,
+      deathblow: { offset: 42, landed: true },
+    });
+    vi.stubGlobal("window", { localStorage: fakeStorage({ "deflect:v2:daily:2026-11-14": old }) });
+    const rec = loadDaily("2026-11-14");
+    vi.unstubAllGlobals();
+    expect(rec.deathblow).toEqual({ offset: 42, landed: true });
+    expect(rec.deathblow?.slipped).toBeUndefined();
+    expect(rec.done).toBe(true);
+    expect(applyRun(emptyStats(), "2026-11-14", rec.results, rec.deathblow?.landed === true).deathblows).toBe(1);
   });
 
   it("a saved run that is owed its Deathblow loads as not done; an old finished record stays done", () => {

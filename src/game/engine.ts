@@ -20,9 +20,14 @@ import { breakAfter } from "./pacing";
 import { computeLayout, Scene, type Layout } from "./scene";
 import { makeResult, type StrikeResult } from "./scoring";
 import {
+  DEATHBLOW_BEAT_MS,
+  DEATHBLOW_BEATS,
   DEATHBLOW_DEAF_MS,
   DEATHBLOW_LATE_MS,
   DEATHBLOW_LEAD_MS,
+  DEATHBLOW_RETRY_DEAF_MS,
+  DEATHBLOW_WINDOW_MS,
+  deathblowRetryMark,
   judgeDeathblow,
   staggerStep,
   type DeathblowResult,
@@ -54,6 +59,8 @@ export interface EngineOptions {
   onStagger?: (state: StaggerState) => void;
   /** The guardian staggered and the Deathblow beats began. */
   onDeathblowStart?: () => void;
+  /** The first attempt missed: one retry follows (the slip is spent). */
+  onDeathblowSlip?: () => void;
   onDeathblow?: (result: DeathblowResult) => void;
   onComplete: () => void;
 }
@@ -132,6 +139,10 @@ export class Engine {
   private dbT0 = 0;
   private dbMark = 0;
   private dbTapped: number | null = null;
+  /** 0 on the first mark, 1 once the slip is spent and the retry mark is live. */
+  private dbAttempt: 0 | 1 = 0;
+  /** When the slip was spent (raw clock), or null. The closing ring restarts here. */
+  private dbSlipAt: number | null = null;
 
   private strike: Strike | null = null;
   private t0 = 0;
@@ -258,9 +269,35 @@ export class Engine {
     const t = Math.abs(timeStamp - now) < 2000 ? timeStamp : now;
     if (this.mode === "deathblow") {
       if (this.dbTapped !== null || t - this.dbT0 < DEATHBLOW_DEAF_MS) return;
+      // A tap that was on time for the first mark but reached us after the frame
+      // loop had already timed it out into the retry still counts for the first
+      // mark. (A slip spent by an early tap is never undone.)
+      const first = this.dbMark - DEATHBLOW_BEAT_MS;
+      if (
+        this.dbAttempt === 1 &&
+        this.dbSlipAt !== null &&
+        this.dbSlipAt >= first + DEATHBLOW_WINDOW_MS &&
+        Math.abs(t - first) <= DEATHBLOW_WINDOW_MS
+      ) {
+        this.dbAttempt = 0;
+        this.dbSlipAt = null;
+        this.dbMark -= DEATHBLOW_BEAT_MS;
+      }
+      if (this.dbAttempt === 0) {
+        // Past the first window the frame loop spends the slip; this tap was a straggler.
+        if (t - this.dbMark > DEATHBLOW_WINDOW_MS) return;
+      } else if (t - (this.dbMark - DEATHBLOW_BEAT_MS) < DEATHBLOW_RETRY_DEAF_MS) {
+        // Still the first mark's aftermath: it must not spend the retry.
+        return;
+      }
       if (t - this.dbMark > DEATHBLOW_LATE_MS) return;
-      this.dbTapped = t;
       this.scene.tapAck(now, this.layout);
+      if (this.dbAttempt === 0 && Math.abs(t - this.dbMark) > DEATHBLOW_WINDOW_MS) {
+        // An early miss spends the slip at once and the retry starts.
+        this.spendSlip(now);
+        return;
+      }
+      this.dbTapped = t;
       // Resolve on the mark (or now, if the tap was late), like a strike.
       if (t >= this.dbMark) this.resolveDeathblow(now);
       return;
@@ -292,7 +329,7 @@ export class Engine {
     const s = this.strike;
     let phase: string = this.mode;
     if (this.mode === "strike" && s) phase = bladePose(s, now - this.t0).phase;
-    if (this.mode === "deathblow") phase = `deathblow (mark in ${Math.round(this.dbMark - now)} ms)`;
+    if (this.mode === "deathblow") phase = `deathblow${this.dbAttempt === 1 ? " retry" : ""} (mark in ${Math.round(this.dbMark - now)} ms)`;
     if (this.paused) phase = `${phase} (held)`;
     return {
       phase,
@@ -442,16 +479,31 @@ export class Engine {
     this.dbT0 = now;
     this.dbMark = now + DEATHBLOW_LEAD_MS;
     this.dbTapped = null;
+    // Always the whole Deathblow with the slip unused (also after a pause).
+    this.dbAttempt = 0;
+    this.dbSlipAt = null;
     this.anim = { from: this.angle, start: now, segs: [{ to: REST + rad(10), dur: 420, ease: easeOutCubic }] };
     this.scene.deathblowStart(now);
     this.scene.kick("stagger", now);
-    this.o.audio.heartbeats(DEATHBLOW_LEAD_MS / 1000);
+    this.o.audio.heartbeats(DEATHBLOW_LEAD_MS / 1000, DEATHBLOW_BEATS);
     this.o.onDeathblowStart?.();
+  }
+
+  /** The first attempt missed: schedule the retry one beat later, one extra heartbeat. */
+  private spendSlip(now: number): void {
+    this.dbAttempt = 1;
+    this.dbSlipAt = now;
+    this.dbMark = deathblowRetryMark(this.dbMark);
+    this.dbTapped = null;
+    this.scene.deathblowSlip(now, this.layout);
+    this.o.audio.slip();
+    this.o.audio.heartbeats((this.dbMark - now) / 1000, 1);
+    this.o.onDeathblowSlip?.();
   }
 
   private resolveDeathblow(now: number): void {
     if (this.mode !== "deathblow") return;
-    const result = judgeDeathblow(this.dbTapped === null ? null : this.dbTapped - this.dbMark);
+    const result = judgeDeathblow(this.dbTapped === null ? null : this.dbTapped - this.dbMark, this.dbAttempt === 1);
     this.owed = false;
     if (result.landed) {
       this.scene.deathblowLanded(now, this.layout);
@@ -563,7 +615,10 @@ export class Engine {
 
     if (this.mode === "deathblow") {
       if (this.dbTapped !== null && now >= this.dbMark) this.resolveDeathblow(now);
-      else if (now >= this.dbMark + DEATHBLOW_LATE_MS) this.resolveDeathblow(now);
+      else if (this.dbAttempt === 0 && this.dbTapped === null && now >= this.dbMark + DEATHBLOW_WINDOW_MS) {
+        // No tap on the first mark: the slip is spent and the retry starts.
+        this.spendSlip(now);
+      } else if (this.dbAttempt === 1 && now >= this.dbMark + DEATHBLOW_LATE_MS) this.resolveDeathblow(now);
     }
 
     this.angle = this.currentAngle(now);
@@ -582,7 +637,8 @@ export class Engine {
       presence: Math.min(1, (now - this.startedAt) / (INTRO_MS * 0.8)),
       menace: inStrike ? 1 : 0.3,
       stalled: this.stalled && inStrike,
-      deathblow: this.mode === "deathblow" ? { t0: this.dbT0, mark: this.dbMark } : null,
+      deathblow:
+        this.mode === "deathblow" ? { t0: this.dbT0, mark: this.dbMark, slipAt: this.dbSlipAt } : null,
       pixelRatio: this.dpr,
     });
 

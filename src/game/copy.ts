@@ -1,4 +1,5 @@
 import { GAME_NAME, ROUNDS_PER_RUN, STRIKES_PER_ROUND } from "./config";
+import { DEATHBLOW_BEATS } from "./stagger";
 
 /**
  * Player-facing copy that quotes the run structure. Everything derives from
@@ -17,6 +18,11 @@ const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
 const rounds = () => plural(ROUNDS_PER_RUN, "round", "rounds");
 const strikes = () => plural(STRIKES_PER_ROUND, "strike", "strikes");
+
+const ORDINALS = ["zeroth", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth"] as const;
+
+/** The beat the Deathblow is struck on, e.g. "third heartbeat". */
+export const deathblowBeat = (): string => `${ORDINALS[DEATHBLOW_BEATS] ?? `${DEATHBLOW_BEATS}th`} heartbeat`;
 
 /** Title screen tagline. */
 export const tagline = (): string =>

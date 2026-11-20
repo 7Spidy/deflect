@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { GameAudio } from "@/game/audio";
 import { BOSSES, type Boss } from "@/game/bosses";
 import { ROUNDS_PER_RUN, roundOf, STRIKES_PER_RUN } from "@/game/config";
-import { howToStrikes, tagline } from "@/game/copy";
+import { deathblowBeat, howToStrikes, tagline } from "@/game/copy";
 import {
   bossForDate,
   dailySeed,
@@ -314,8 +314,8 @@ export default function Game() {
             </li>
             <li>{howToStrikes()}</li>
             <li>
-              Deflect well to fill its <span className="text-gold-bright">stagger</span>. Break it, then strike on the
-              fourth heartbeat.
+              Deflect well to fill its <span className="text-gold-bright">stagger</span>. Break it, then strike on the{" "}
+              {deathblowBeat()}.
             </li>
           </ol>
           <button

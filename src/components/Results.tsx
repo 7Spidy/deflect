@@ -189,7 +189,7 @@ export default function Results(props: ResultsProps) {
           </p>
           <p className={`mt-2 text-xl ${blow?.landed ? "text-gold-bright" : blow ? "text-blood" : "text-ash"}`}>
             {blow?.landed
-              ? `⚔ Deathblow landed${blowMs === null ? "" : `, ${blowMs === 0 ? "dead on" : `${blowMs} ms ${(blow.offset ?? 0) < 0 ? "early" : "late"}`}`}`
+              ? `⚔ Deathblow landed${blow.slipped ? " (one slip)" : ""}${blowMs === null ? "" : `, ${blowMs === 0 ? "dead on" : `${blowMs} ms ${(blow.offset ?? 0) < 0 ? "early" : "late"}`}`}`
               : blow
                 ? `Staggered it, but the Deathblow ${blowMs === null ? "never came" : "missed"}`
                 : `Never staggered (meter peaked at ${staggerPeak(results)})`}

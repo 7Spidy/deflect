@@ -484,7 +484,7 @@ export class GameAudio {
   }
 
   /** The Deathblow count: heartbeats, the last one on the mark (`lead` seconds away). */
-  heartbeats(lead: number, beats = 4): void {
+  heartbeats(lead: number, beats: number): void {
     if (!this.ctx || !this.master) return;
     const step = lead / beats;
     for (let i = 1; i <= beats; i++) {
@@ -493,6 +493,11 @@ export class GameAudio {
       this.tone(last ? 62 : 54, t - 0.09, last ? 0.2 : 0.14, 0.18, "sine", 38);
       this.tone(last ? 70 : 60, t, last ? 0.28 : 0.18, 0.26, "sine", 40);
     }
+  }
+
+  /** A slipped Deathblow beat: a short, soft, dull tick. Nothing like the failure roar. */
+  slip(): void {
+    this.tone(150, 0, 0.1, 0.12, "triangle", 90);
   }
 
   /** Deathblow outcome: a ringing gong and a deep cut, or a dull rebound. */

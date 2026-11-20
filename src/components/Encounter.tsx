@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { GameAudio } from "@/game/audio";
 import type { Boss } from "@/game/bosses";
 import { isPhaseShift, ROUNDS_PER_RUN, STRIKES_PER_ROUND } from "@/game/config";
+import { deathblowBeat } from "@/game/copy";
 import { Engine } from "@/game/engine";
 import { MOVES, planDay } from "@/game/moves";
 import { runScore, type StrikeResult } from "@/game/scoring";
@@ -205,6 +206,9 @@ export default function Encounter(props: EncounterProps) {
         setPhaseCard(null);
         setStaggered(true);
       },
+      onDeathblowSlip: () => {
+        setFeedback({ id: ++feedbackId, title: "Slip", detail: "One more beat", tone: "text-ash" });
+      },
       onDeathblow: (result) => {
         blow = result;
         setStaggered(false);
@@ -214,11 +218,11 @@ export default function Encounter(props: EncounterProps) {
           id: ++feedbackId,
           title: result.landed ? "Deathblow" : "It recovers",
           detail:
-            ms === null
+            (ms === null
               ? "No tap"
               : ms === 0
                 ? "0 ms, dead on"
-                : `${ms} ms ${(result.offset ?? 0) < 0 ? "early" : "late"}`,
+                : `${ms} ms ${(result.offset ?? 0) < 0 ? "early" : "late"}`) + (result.slipped ? ", one slip" : ""),
           tone: result.landed ? "text-gold-bright" : "text-blood",
         });
         propsRef.current.onDeathblow(result);
@@ -387,7 +391,7 @@ export default function Encounter(props: EncounterProps) {
             aria-live="assertive"
           >
             <p className="fade-in font-display text-3xl font-bold tracking-[0.2em] text-blood uppercase">Staggered</p>
-            <p className="fade-in mt-1 text-xl text-bone italic">Strike on the fourth heartbeat.</p>
+            <p className="fade-in mt-1 text-xl text-bone italic">Strike on the {deathblowBeat()}.</p>
           </div>
         )}
 

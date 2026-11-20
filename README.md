@@ -42,8 +42,10 @@ falls back to the project's production URL).
 Good deflects fill the guardian's stagger meter (True +12, Clean +8, Glancing +4,
 Grazed 0, a miss -12) and it drains by 8 after every round. All Clean breaks it in
 round six, all True in round four, Glancing alone never does. When it breaks the
-guardian slumps, four heartbeats count down while a ring closes on the guard line, and
-one tap on the fourth beat (within 60 ms) lands the Deathblow. One per run. It never
+guardian slumps, three heartbeats count down (500 ms apart) while a ring closes on the
+guard line, and one tap on the third beat (within 90 ms) lands the Deathblow. One slip is
+forgiven: a miss on the first mark gets one retry a beat later, a second miss fails it.
+One per run. It never
 changes the score; it is the climax, a lifetime count in Records, and the last mark on
 the share row (⚔️ landed, 💨 missed). The meter is a pure function of the results, so a
 resumed run rebuilds it exactly, and a run is not finished while a Deathblow is owed.

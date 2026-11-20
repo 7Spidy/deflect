@@ -9,7 +9,7 @@ import {
   type PortraitRect,
 } from "./living";
 import { omenFor, type Omen } from "./moves";
-import { DEATHBLOW_BEATS } from "./stagger";
+import { DEATHBLOW_BEAT_MS, DEATHBLOW_BEATS } from "./stagger";
 
 /**
  * Canvas 2D renderer. Knows nothing about rules, only how to draw a frame.
@@ -61,8 +61,11 @@ export interface FrameState {
   stalled: boolean;
   /** Device pixel ratio, for the portrait's offscreen buffer. */
   pixelRatio: number;
-  /** The Deathblow beats are running: start and mark (raw clock), else null. */
-  deathblow?: { t0: number; mark: number } | null;
+  /**
+   * The Deathblow beats are running: start and current mark (raw clock), and when
+   * the slip was spent (the retry mark is one beat later), else null.
+   */
+  deathblow?: { t0: number; mark: number; slipAt: number | null } | null;
 }
 
 const GOLD = "212,175,55";
@@ -417,6 +420,13 @@ export class Scene {
   /** Beats abandoned (the fight was held). Nothing lingers. */
   deathblowCancel(): void {
     this.edge = null;
+  }
+
+  /** The first mark was missed: a dull, soft answer, clearly not the failure roar. */
+  deathblowSlip(now: number, l: Layout): void {
+    const t = this.v(now);
+    this.flash = { rgb: "90,30,30", alpha: 0.08 * this.fxA, start: t, dur: 260 };
+    this.addRing(t, 360, l.w * 0.05, l.w * 0.2, 1.5, 0.3, "150,70,60");
   }
 
   /** Deathblow landed: a gold cleave through the guardian, the biggest hit in the game. */
@@ -931,12 +941,13 @@ export class Scene {
     ctx: CanvasRenderingContext2D,
     l: Layout,
     raw: number,
-    db: { t0: number; mark: number },
+    db: { t0: number; mark: number; slipAt: number | null },
   ): void {
-    const lead = db.mark - db.t0;
-    const u = Math.max(0, Math.min(1, (raw - db.t0) / lead));
-    const beat = lead / DEATHBLOW_BEATS;
-    const since = (raw - db.t0) % beat;
+    // Heartbeats run on one steady pulse from the start; a retry just adds one.
+    const beats = Math.round((db.mark - db.t0) / DEATHBLOW_BEAT_MS);
+    const ringFrom = db.slipAt ?? db.t0;
+    const u = Math.max(0, Math.min(1, (raw - ringFrom) / (db.mark - ringFrom)));
+    const since = (raw - db.t0) % DEATHBLOW_BEAT_MS;
     const pulse = raw < db.mark + 60 ? Math.max(0, 1 - since / 220) : 0;
     const r0 = l.w * 0.05;
     const x = l.cx;
@@ -950,7 +961,7 @@ export class Scene {
     ctx.beginPath();
     ctx.arc(x, y, r0 * (1 + 0.18 * pulse), 0, Math.PI * 2);
     ctx.stroke();
-    // Closing ring: lands on the target exactly at the mark.
+    // Closing ring: lands on the target exactly at the mark (re-closes after a slip).
     if (raw < db.mark) {
       const r = r0 + (l.w * 0.62 - r0) * (1 - u);
       ctx.strokeStyle = `rgba(230,60,40,${0.25 + 0.6 * u})`;
@@ -960,11 +971,16 @@ export class Scene {
       ctx.arc(x, y, r, 0, Math.PI * 2);
       ctx.stroke();
     }
-    // Beat pips: how many are left.
-    const done = Math.min(DEATHBLOW_BEATS, Math.floor((raw - db.t0) / beat));
-    for (let i = 0; i < DEATHBLOW_BEATS; i++) {
-      const px = x + (i - (DEATHBLOW_BEATS - 1) / 2) * l.w * 0.05;
-      ctx.fillStyle = i < done ? "rgba(255,214,120,0.95)" : "rgba(255,214,120,0.25)";
+    // Beat pips: how many are left. A slipped beat stays as a dim red pip.
+    const done = Math.min(beats, Math.floor((raw - db.t0) / DEATHBLOW_BEAT_MS));
+    for (let i = 0; i < beats; i++) {
+      const px = x + (i - (beats - 1) / 2) * l.w * 0.05;
+      const slipped = db.slipAt !== null && i === DEATHBLOW_BEATS - 1;
+      ctx.fillStyle = slipped
+        ? "rgba(150,50,44,0.6)"
+        : i < done
+          ? "rgba(255,214,120,0.95)"
+          : "rgba(255,214,120,0.25)";
       ctx.beginPath();
       ctx.arc(px, y + l.w * 0.1, l.w * 0.009, 0, Math.PI * 2);
       ctx.fill();
